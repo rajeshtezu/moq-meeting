@@ -107,3 +107,16 @@ Findings:
 - Like `@moq/watch`: decoded PCM goes to an AudioWorklet jitter buffer, then to `AudioContext.destination` (48 kHz). The buffer starts at 60 ms, and when it exceeds 200 ms it skips back to 80 ms.
 - The AudioContext is created inside the Join click (autoplay policy).
 - Echo cancellation relies on Chrome's tab-wide AEC covering Web Audio output. **Not yet verified with real speakers.**
+
+## Presence and pausing (Phase 2)
+
+- `presence` is a `@moq/json` `Snapshot.Producer<Presence>`. `update()` is a no-op when the value is unchanged, and a late subscriber's `Snapshot.Consumer` yields the current value first, so "late joiners see current state" needs no extra code.
+- Presence from peers is validated with `parsePresence` (`packages/shared`), because peers are untrusted.
+- **Pausing a media track:**
+  - disable the `MediaStreamTrack` (Chrome turns the camera light off, and the processor keeps yielding black or silent frames, which we drop)
+  - `encoder.flush()`
+  - `Legacy.Producer.cut()`, so subscribers see a clean break instead of the last group reading as live
+  - on resume, force a keyframe (video) or start a new group (audio)
+- The receiver needs no changes: after the cut, `Container.Consumer.next()` reports `continuous: false` and the decoder waits for the keyframe.
+- Speaking detection: RMS of decoded PCM (peers) or `AnalyserNode` time-domain data (self), threshold ≈ 0.008 (−42 dBFS), 400 ms hold.
+- Testing gotcha: the in-app browser's screenshots sometimes show a `<video>` preview as black after switching tabs, even though it's playing (pixels read back fine). It's a capture artifact, not an app bug.

@@ -1,6 +1,8 @@
+import type { Presence } from "@moq-meeting/shared";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { joinRoom, savedName, saveName } from "../api";
 import { Card } from "../components/Card";
+import { CamIcon, MicIcon } from "../components/Icons";
 import { PeerTile } from "../components/PeerTile";
 import { SelfTile } from "../components/SelfTile";
 import { AudioOut } from "../media/audio-out";
@@ -26,6 +28,8 @@ export function Room({ roomId }: { roomId: string }) {
 	const [joined, setJoined] = useState<Joined>();
 	const [status, setStatus] = useState<Status>({ kind: "connecting" });
 	const [peers, setPeers] = useState<string[]>([]);
+	const [presences, setPresences] = useState<Record<string, Presence>>({});
+	const [self, setSelf] = useState<Presence>();
 	const [joinError, setJoinError] = useState<string>();
 	const [busy, setBusy] = useState(false);
 	const current = useRef<Joined>(undefined);
@@ -46,7 +50,11 @@ export function Room({ roomId }: { roomId: string }) {
 				token,
 				{
 					onPeerJoined: (id) => setPeers((p) => (p.includes(id) ? p : [...p, id])),
-					onPeerLeft: (id) => setPeers((p) => p.filter((x) => x !== id)),
+					onPeerLeft: (id) => {
+						setPeers((p) => p.filter((x) => x !== id));
+						setPresences(({ [id]: _, ...rest }) => rest);
+					},
+					onPresence: (id, presence) => setPresences((p) => ({ ...p, [id]: presence })),
 					onMessage: () => {},
 					onClosed: (err) => setStatus({ kind: "error", message: err ? String(err) : "disconnected" }),
 				},
@@ -55,6 +63,7 @@ export function Room({ roomId }: { roomId: string }) {
 			const j = { session, audioOut, stream: media.stream, stopMedia: media.stop };
 			current.current = j;
 			setJoined(j);
+			setSelf(session.presence);
 			setStatus({ kind: "connected", transport: session.transport });
 		} catch (err) {
 			media?.stop();
@@ -67,6 +76,20 @@ export function Room({ roomId }: { roomId: string }) {
 		} finally {
 			setBusy(false);
 		}
+	}
+
+	function toggleMic() {
+		const s = current.current?.session;
+		if (!s) return;
+		s.setMic(!s.presence.mic);
+		setSelf(s.presence);
+	}
+
+	function toggleCam() {
+		const s = current.current?.session;
+		if (!s) return;
+		s.setCam(!s.presence.cam);
+		setSelf(s.presence);
 	}
 
 	function leave() {
@@ -84,7 +107,7 @@ export function Room({ roomId }: { roomId: string }) {
 		return () => window.removeEventListener("pagehide", onUnload);
 	}, []);
 
-	if (!joined) {
+	if (!joined || !self) {
 		return (
 			<Card title={`Join room ${roomId}`}>
 				<form onSubmit={onJoin} className="grid gap-4">
@@ -153,18 +176,48 @@ export function Room({ roomId }: { roomId: string }) {
 					>
 						Copy link
 					</button>
-					<button type="button" className="btn-danger" onClick={leave}>
-						Leave
-					</button>
 				</div>
 			</header>
 
 			<main className={`grid flex-1 content-center gap-3 p-4 ${cols}`} data-testid="grid">
-				<SelfTile name={joined.session.name} stream={joined.stream} mirror={source === "camera"} />
+				<SelfTile
+					presence={self}
+					stream={joined.stream}
+					context={joined.audioOut.context}
+					mirror={source === "camera"}
+				/>
 				{peers.map((id) => (
-					<PeerTile key={id} id={id} session={joined.session} audioOut={joined.audioOut} />
+					<PeerTile key={id} id={id} presence={presences[id]} session={joined.session} audioOut={joined.audioOut} />
 				))}
 			</main>
+
+			<footer className="flex justify-center gap-3 border-t border-line bg-surface px-4 py-3">
+				<button
+					type="button"
+					data-testid="toggle-mic"
+					aria-pressed={!self.mic}
+					className={self.mic ? "btn-ghost" : "btn-danger"}
+					onClick={toggleMic}
+					disabled={!joined.stream.getAudioTracks().length}
+				>
+					<MicIcon off={!self.mic} />
+					{self.mic ? "Mute" : "Unmute"}
+				</button>
+				<button
+					type="button"
+					data-testid="toggle-cam"
+					aria-pressed={!self.cam}
+					className={self.cam ? "btn-ghost" : "btn-danger"}
+					onClick={toggleCam}
+					disabled={!joined.stream.getVideoTracks().length}
+				>
+					<CamIcon off={!self.cam} />
+					{self.cam ? "Stop video" : "Start video"}
+				</button>
+				<button type="button" className="btn-danger" onClick={leave}>
+					Leave
+				</button>
+			</footer>
 		</div>
 	);
 }

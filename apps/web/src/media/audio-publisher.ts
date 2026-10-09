@@ -23,6 +23,7 @@ export class AudioPublisher {
 	#reader: ReadableStreamDefaultReader<AudioData> | undefined;
 	#encoder: AudioEncoder | undefined;
 	#groupStart = Number.NEGATIVE_INFINITY;
+	#enabled = true;
 	#closed = false;
 
 	constructor(
@@ -52,6 +53,11 @@ export class AudioPublisher {
 			// Pin the capture→session offset at capture time, before any await.
 			this.#rebase.apply(data.timestamp);
 			this.#encoder ??= await this.#createEncoder(data.sampleRate, data.numberOfChannels);
+			// Muted: the track is disabled and yields silence; send nothing.
+			if (!this.#enabled) {
+				data.close();
+				continue;
+			}
 			this.#encoder.encode(data);
 			data.close();
 		}
@@ -89,6 +95,22 @@ export class AudioPublisher {
 		});
 		encoder.configure(config);
 		return encoder;
+	}
+
+	/** Mic mute: stop sending, flush, and cut the group; unmute starts a fresh group. */
+	setEnabled(enabled: boolean) {
+		if (enabled === this.#enabled || this.#closed) return;
+		this.#enabled = enabled;
+		this.#source.enabled = enabled;
+		if (enabled) {
+			this.#groupStart = Number.NEGATIVE_INFINITY;
+			return;
+		}
+		const encoder = this.#encoder;
+		void (async () => {
+			if (encoder?.state === "configured") await encoder.flush().catch(() => {});
+			if (!this.#enabled && !this.#closed) this.#producer.cut();
+		})();
 	}
 
 	close() {

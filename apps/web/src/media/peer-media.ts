@@ -4,6 +4,7 @@ import { Time } from "@moq/net";
 import type { AudioOut, PeerAudio } from "./audio-out";
 import { fromHex } from "./catalog";
 import { wallTimeMs } from "./clock";
+import { rms, SpeakingDetector } from "./speaking";
 
 export interface PeerStats {
 	fps: number;
@@ -45,6 +46,7 @@ export class PeerMedia {
 	#frames = 0;
 	#latency: number | undefined;
 	#audioPeak = 0;
+	readonly #speaking = new SpeakingDetector();
 	#statsTimer: ReturnType<typeof setInterval>;
 	#stats: PeerStats = { fps: 0, audio: false };
 
@@ -183,7 +185,9 @@ export class PeerMedia {
 			output: (data) => {
 				if (stopped || !out) return data.close();
 				const pcm = downmix(data);
-				this.#audioPeak = Math.max(this.#audioPeak, rms(pcm));
+				const level = rms(pcm);
+				this.#audioPeak = Math.max(this.#audioPeak, level);
+				this.#speaking.push(level);
 				out.push(pcm);
 				data.close();
 			},
@@ -217,6 +221,11 @@ export class PeerMedia {
 		};
 	}
 
+	/** Whether this peer is audibly speaking right now (debounced). */
+	get speaking(): boolean {
+		return this.#speaking.speaking();
+	}
+
 	close() {
 		this.#abort.abort();
 		clearInterval(this.#statsTimer);
@@ -235,10 +244,4 @@ function downmix(data: AudioData): Float32Array {
 		for (let i = 0; i < frames; i++) out[i] = (out[i] ?? 0) + (tmp[i] ?? 0) / data.numberOfChannels;
 	}
 	return out;
-}
-
-function rms(samples: Float32Array): number {
-	let sum = 0;
-	for (const s of samples) sum += s * s;
-	return Math.sqrt(sum / (samples.length || 1));
 }

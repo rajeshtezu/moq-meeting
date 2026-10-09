@@ -41,6 +41,21 @@ export const Tracks = {
 
 export const MAX_NAME_LENGTH = 40;
 
+/** Published on each participant's `presence` track as a JSON snapshot. */
+export interface Presence {
+	name: string;
+	mic: boolean;
+	cam: boolean;
+}
+
+/** Validate a presence value from the wire; peers are untrusted. */
+export function parsePresence(value: unknown): Presence | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const v = value as Record<string, unknown>;
+	if (typeof v.name !== "string" || typeof v.mic !== "boolean" || typeof v.cam !== "boolean") return undefined;
+	return { name: v.name.slice(0, MAX_NAME_LENGTH), mic: v.mic, cam: v.cam };
+}
+
 export interface CreateRoomResponse {
 	roomId: string;
 }

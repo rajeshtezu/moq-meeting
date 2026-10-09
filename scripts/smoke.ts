@@ -7,7 +7,7 @@
  */
 
 import * as Moq from "@moq/net";
-import type { TokenResponse } from "@moq-meeting/shared";
+import type { Presence, TokenResponse } from "@moq-meeting/shared";
 import { type HelloMessage, RoomSession } from "../apps/web/src/moq/session";
 
 const base = process.argv[2] ?? "http://localhost:3000";
@@ -55,10 +55,24 @@ let resolveMsg: (m: HelloMessage) => void = () => {};
 const joined = new Promise<string>((r) => (resolveJoin = r));
 const received = new Promise<HelloMessage>((r) => (resolveMsg = r));
 
+/** Latest presence per peer, as seen by bob, plus a way to wait for a matching value. */
+const bobSees = new Map<string, Presence>();
+const presenceWaiters: { pred: (id: string, p: Presence) => boolean; resolve: () => void }[] = [];
+function waitForPresence(pred: (id: string, p: Presence) => boolean): Promise<void> {
+	for (const [id, p] of bobSees) if (pred(id, p)) return Promise.resolve();
+	return new Promise((resolve) => presenceWaiters.push({ pred, resolve }));
+}
+
 const bob = await RoomSession.join(overWebSocket(tokenB), {
 	...noop,
 	onPeerJoined: resolveJoin,
 	onMessage: resolveMsg,
+	onPresence: (id, p) => {
+		bobSees.set(id, p);
+		for (const w of presenceWaiters.splice(0))
+			if (w.pred(id, p)) w.resolve();
+			else presenceWaiters.push(w);
+	},
 });
 const alice = await RoomSession.join(overWebSocket(tokenA), noop);
 
@@ -70,24 +84,46 @@ const sender = setInterval(() => alice.send("hello from alice"), 200);
 const msg = await withTimeout(received, 5000, "bob receives alice's frame").finally(() => clearInterval(sender));
 check(msg.text === "hello from alice" && msg.name === "alice", "bob receives alice's hello frame");
 
-// 2. Leaving retracts the announcement.
+// 2. Presence: names arrive, and a mic toggle reaches peers within a second.
+const aliceId = tokenA.participantId;
+await withTimeout(
+	waitForPresence((id, p) => id === aliceId && p.name === "alice"),
+	5000,
+	"alice's presence",
+);
+check(true, "bob sees alice's name via presence");
+const toggledAt = performance.now();
+alice.setMic(true);
+await withTimeout(
+	waitForPresence((id, p) => id === aliceId && p.mic),
+	1000,
+	"mic toggle within 1 s",
+);
+check(true, `presence update delivered in ${Math.round(performance.now() - toggledAt)} ms`);
+
+// 3. Leaving retracts the announcement, and a late joiner sees current presence.
 let resolveLeft: (id: string) => void = () => {};
+let carolSaw: Presence | undefined;
 const left = new Promise<string>((r) => (resolveLeft = r));
 const bob2 = await RoomSession.join(
 	overWebSocket(await post<TokenResponse>(`/api/rooms/${roomId}/token`, { name: "carol" })),
 	{
 		...noop,
 		onPeerLeft: resolveLeft,
+		onPresence: (id, p) => {
+			if (id === aliceId) carolSaw = p;
+		},
 	},
 );
 await Bun.sleep(300);
+check(carolSaw?.mic === true && carolSaw.name === "alice", "late joiner gets alice's current presence (mic on)");
 alice.close();
 check(
 	(await withTimeout(left, 5000, "alice retraction")) === tokenA.participantId,
 	"leaving retracts the announcement",
 );
 
-// 3. A token for this room is refused on another room's path.
+// 4. A token for this room is refused on another room's path.
 const otherRoom = (await post<{ roomId: string }>("/api/rooms")).roomId;
 const stolen = new URL(overWebSocket(tokenB).relayUrl);
 stolen.pathname = `/rooms/${otherRoom}`;
@@ -100,7 +136,7 @@ const refused = await Moq.Connection.connect({ url: stolen }).then(
 );
 check(refused, "token for room A refused on room B");
 
-// 4. A participant can't publish under someone else's ID: carol must never see it announced.
+// 5. A participant can't publish under someone else's ID: carol must never see it announced.
 const victim = "victim0000";
 const seen: string[] = [];
 const observer = await RoomSession.join(

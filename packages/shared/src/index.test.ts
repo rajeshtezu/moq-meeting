@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { isValidId, randomId, roomPath } from "./index";
+import { isValidId, parsePresence, randomId, roomPath } from "./index";
 
 test("randomId produces valid, distinct ids", () => {
 	const ids = new Set(Array.from({ length: 1000 }, () => randomId()));
@@ -15,4 +15,15 @@ test("isValidId rejects path separators and junk", () => {
 
 test("roomPath", () => {
 	expect(roomPath("abc123def")).toBe("rooms/abc123def");
+});
+
+test("parsePresence accepts valid values and truncates long names", () => {
+	expect(parsePresence({ name: "alice", mic: true, cam: false })).toEqual({ name: "alice", mic: true, cam: false });
+	expect(parsePresence({ name: "x".repeat(100), mic: false, cam: false })?.name).toHaveLength(40);
+});
+
+test("parsePresence rejects malformed values", () => {
+	for (const bad of [null, "alice", 42, {}, { name: 1, mic: true, cam: true }, { name: "a", mic: "yes", cam: true }]) {
+		expect(parsePresence(bad)).toBeUndefined();
+	}
 });

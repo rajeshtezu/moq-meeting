@@ -4,7 +4,7 @@
 |---|---|
 | Project | `moq-meeting` — small browser-based meeting app on Media over QUIC |
 | Owner | Rajesh Kumar |
-| Status | Approved with defaults (2026-10-09). Phases 0 and 1 complete. |
+| Status | Approved with defaults (2026-10-09). Phases 0–2 complete. |
 | Date | 2026-10-09 |
 | References | [doc.moq.dev](https://doc.moq.dev/), [moq-lite concepts](https://doc.moq.dev/concept/moq-lite.html), [hang format](https://doc.moq.dev/concept/hang.html), [relay](https://doc.moq.dev/bin/relay/), [relay auth](https://doc.moq.dev/bin/relay/auth.html), [JS libraries](https://doc.moq.dev/lib/js/), [Bun](https://bun.com/) |
 
@@ -112,7 +112,7 @@ Broadcast      : <participantId>/screen     (phase 4)
 | `catalog.json` | hang catalog (renditions + decoder config + `clock`), written with `@moq/json` Snapshot | snapshot opens a group, deltas follow | 100 (`PRIORITY.catalog`) | latest only | 1 |
 | `video` | H.264 baseline (Annex B) or VP8 frames, hang `legacy` container (varint µs timestamp + payload) | 1 group = 1 GoP, starting with a keyframe (keyframe every 2 s) | 60 (`PRIORITY.video`) | subscriber max-age 500 ms | 1 |
 | `audio` | Opus 48 kHz mono, 20 ms frames, 32 kbps | ~1 s per group | 80 (`PRIORITY.audio`) | subscriber max-age 300 ms | 1 |
-| `presence` | JSON `{name, mic, cam, screen}` | new group on every change (late joiners read the latest) | high | latest only | 2 |
+| `presence` | JSON `{name, mic, cam}` via `@moq/json` Snapshot (`screen` added in phase 4) | snapshot opens a group, deltas follow; late joiners read the latest | 90 (`PRIORITY.text`) | latest only | 2 |
 | `chat` | JSON `{id, ts, text}` per frame | hang JSON `mode: "stream"`, one group per session | low | ascending | 3 |
 
 The screen broadcast (phase 4) carries `catalog.json` and `video` with a higher resolution and lower frame rate (e.g. 1080p at 5–15 fps) and no audio.
@@ -275,8 +275,21 @@ Measured with 3 participants in Chrome tabs on one machine, using the synthetic 
 - **Real camera/mic and echo cancellation with speakers.** This needs a person in the room. Playout follows `@moq/watch` (AudioWorklet → destination) and relies on Chrome's tab-wide AEC. If echo shows up, the fallback is routing playout through a `MediaStreamTrackGenerator` → `<audio>` element.
 - Behavior under congestion (phase 5), and cross-machine LAN latency.
 
-## 17. Next steps
+## 17. Phase 2 outcome
 
-1. Manual check: two machines on one LAN with real cameras and speakers. Confirm no echo, and record latency.
-2. Phase 2: presence track (names, mic/cam state) via `@moq/json` Snapshot, mute/camera-off, active-speaker highlight from the audio level that's already computed.
+| Exit criterion | Result |
+|---|---|
+| State changes reach all peers within 1 s | Mute + camera-off seen by another tab **5 ms** after the click (browser). Headless smoke: **2 ms**. |
+| Late joiners see the correct state | A late joiner saw a muted, camera-off peer **46 ms** after Join (browser). Also covered by smoke. |
+| Display names | From presence. A tile reads "Joining…" until presence arrives. |
+| Mic mute | Track disabled, encoder flushed, group `cut()`. Unmute opens a new group. |
+| Camera off / on | Track disabled (camera light off) with an avatar shown. Resume forces a keyframe, and the first new frame was drawn **35 ms** after the click. |
+| Active speaker (optional) | Speaking ring per tile, from decoded audio RMS for peers and an AnalyserNode for yourself (≈ −42 dBFS threshold, 400 ms hold) |
+
+`bun run smoke` now has 8 checks, including presence delivery and late-join state.
+
+## 18. Next steps
+
+1. Manual check, still open: two machines on one LAN with real cameras and speakers. Confirm no echo, record latency, and check that the speaking threshold suits real voices.
+2. Phase 3: chat via `@moq/json` Stream, one track per participant, merged by timestamp.
 3. Switch to the reconnecting `Moq.Connection` handle.

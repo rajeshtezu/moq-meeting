@@ -48,6 +48,8 @@ export class VideoPublisher {
 	readonly #onRendition: (r: VideoRendition) => void;
 	#reader: ReadableStreamDefaultReader<VideoFrame> | undefined;
 	#encoder: VideoEncoder | undefined;
+	#enabled = true;
+	#forceKeyframe = false;
 	#closed = false;
 
 	constructor(
@@ -89,13 +91,20 @@ export class VideoPublisher {
 				this.#encoder = this.#createEncoder(pendingConfig);
 			}
 
+			// Camera off: the track is disabled and yields black frames; send nothing.
+			if (!this.#enabled) {
+				frame.close();
+				continue;
+			}
+
 			// Under load, drop frames at the source rather than queueing latency.
 			if (this.#encoder.encodeQueueSize > 2) {
 				frame.close();
 				continue;
 			}
 
-			const keyFrame = frame.timestamp - lastKeyframe >= VIDEO.keyframeIntervalUs;
+			const keyFrame = this.#forceKeyframe || frame.timestamp - lastKeyframe >= VIDEO.keyframeIntervalUs;
+			this.#forceKeyframe = false;
 			if (keyFrame) lastKeyframe = frame.timestamp;
 			this.#encoder.encode(frame, { keyFrame });
 			frame.close();
@@ -124,6 +133,26 @@ export class VideoPublisher {
 		});
 		encoder.configure(config);
 		return encoder;
+	}
+
+	/**
+	 * Camera on/off. Off disables the capture track (Chrome turns the camera light off),
+	 * flushes the encoder and cuts the group, so subscribers see a clean break instead of
+	 * a stale frame reading as live. On resumes with a keyframe, opening a new group.
+	 */
+	setEnabled(enabled: boolean) {
+		if (enabled === this.#enabled || this.#closed) return;
+		this.#enabled = enabled;
+		this.#source.enabled = enabled;
+		if (enabled) {
+			this.#forceKeyframe = true;
+			return;
+		}
+		const encoder = this.#encoder;
+		void (async () => {
+			if (encoder?.state === "configured") await encoder.flush().catch(() => {});
+			if (!this.#enabled && !this.#closed) this.#producer.cut();
+		})();
 	}
 
 	close() {

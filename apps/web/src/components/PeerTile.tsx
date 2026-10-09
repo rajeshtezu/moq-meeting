@@ -1,3 +1,4 @@
+import type { Presence } from "@moq-meeting/shared";
 import { useEffect, useRef, useState } from "react";
 import type { AudioOut } from "../media/audio-out";
 import { PeerMedia, type PeerStats } from "../media/peer-media";
@@ -15,19 +16,42 @@ function formatStats(s: PeerStats | undefined): string | undefined {
 	return parts.join(" · ");
 }
 
-export function PeerTile({ id, session, audioOut }: { id: string; session: RoomSession; audioOut: AudioOut }) {
+interface Props {
+	id: string;
+	presence: Presence | undefined;
+	session: RoomSession;
+	audioOut: AudioOut;
+}
+
+export function PeerTile({ id, presence, session, audioOut }: Props) {
 	const canvas = useRef<HTMLCanvasElement>(null);
 	const [stats, setStats] = useState<PeerStats>();
+	const [speaking, setSpeaking] = useState(false);
 
 	useEffect(() => {
 		const request = session.peer(id);
 		if (!request || !canvas.current) return;
 		const media = new PeerMedia(request, canvas.current, audioOut, setStats);
-		return () => media.close();
+		const poll = setInterval(() => setSpeaking(media.speaking), 150);
+		return () => {
+			clearInterval(poll);
+			media.close();
+		};
 	}, [id, session, audioOut]);
 
+	// Until presence arrives, show the tile with a neutral label rather than the raw ID.
+	const name = presence?.name ?? "Joining…";
+	const camOff = presence ? !presence.cam : !stats?.fps;
+
 	return (
-		<Tile label={id} stats={formatStats(stats)}>
+		<Tile
+			testId="peer-tile"
+			label={name}
+			stats={formatStats(stats)}
+			speaking={speaking && presence?.mic !== false}
+			micOff={presence?.mic === false}
+			camOff={camOff}
+		>
 			<canvas ref={canvas} className="h-full w-full object-contain" data-peer={id} />
 		</Tile>
 	);
