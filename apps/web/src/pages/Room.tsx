@@ -2,7 +2,8 @@ import type { Presence } from "@moq-meeting/shared";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { joinRoom, savedName, saveName } from "../api";
 import { Card } from "../components/Card";
-import { CamIcon, MicIcon } from "../components/Icons";
+import { type ChatEntry, ChatPanel } from "../components/ChatPanel";
+import { CamIcon, ChatIcon, MicIcon } from "../components/Icons";
 import { PeerTile } from "../components/PeerTile";
 import { SelfTile } from "../components/SelfTile";
 import { AudioOut } from "../media/audio-out";
@@ -30,6 +31,12 @@ export function Room({ roomId }: { roomId: string }) {
 	const [peers, setPeers] = useState<string[]>([]);
 	const [presences, setPresences] = useState<Record<string, Presence>>({});
 	const [self, setSelf] = useState<Presence>();
+	const [chat, setChat] = useState<ChatEntry[]>([]);
+	const [chatOpen, setChatOpen] = useState(false);
+	const [unread, setUnread] = useState(0);
+	const chatOpenRef = useRef(false);
+	/** Last known name per participant; kept after they leave so their messages stay attributed. */
+	const names = useRef<Record<string, string>>({});
 	const [joinError, setJoinError] = useState<string>();
 	const [busy, setBusy] = useState(false);
 	const current = useRef<Joined>(undefined);
@@ -54,8 +61,14 @@ export function Room({ roomId }: { roomId: string }) {
 						setPeers((p) => p.filter((x) => x !== id));
 						setPresences(({ [id]: _, ...rest }) => rest);
 					},
-					onPresence: (id, presence) => setPresences((p) => ({ ...p, [id]: presence })),
-					onMessage: () => {},
+					onPresence: (id, presence) => {
+						names.current[id] = presence.name;
+						setPresences((p) => ({ ...p, [id]: presence }));
+					},
+					onChat: (from, m) => {
+						addChat({ key: `${from}:${m.id}`, from, text: m.text, sentAt: m.sentAt, mine: false });
+						if (!chatOpenRef.current) setUnread((n) => n + 1);
+					},
 					onClosed: (err) => setStatus({ kind: "error", message: err ? String(err) : "disconnected" }),
 				},
 				media.stream,
@@ -76,6 +89,35 @@ export function Room({ roomId }: { roomId: string }) {
 		} finally {
 			setBusy(false);
 		}
+	}
+
+	/** Merge into one timeline ordered by send time; dedupe by key. */
+	function addChat(entry: ChatEntry) {
+		setChat((list) => {
+			if (list.some((e) => e.key === entry.key)) return list;
+			const next = [...list, entry];
+			next.sort((a, b) => a.sentAt - b.sentAt || a.key.localeCompare(b.key));
+			return next;
+		});
+	}
+
+	function sendChat(text: string): string | undefined {
+		const s = current.current?.session;
+		if (!s) return "not connected";
+		try {
+			const m = s.sendChat(text);
+			addChat({ key: `${s.participantId}:${m.id}`, from: s.participantId, text: m.text, sentAt: m.sentAt, mine: true });
+			return undefined;
+		} catch (err) {
+			return err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	function toggleChat() {
+		const open = !chatOpenRef.current;
+		chatOpenRef.current = open;
+		setChatOpen(open);
+		if (open) setUnread(0);
 	}
 
 	function toggleMic() {
@@ -179,17 +221,27 @@ export function Room({ roomId }: { roomId: string }) {
 				</div>
 			</header>
 
-			<main className={`grid flex-1 content-center gap-3 p-4 ${cols}`} data-testid="grid">
-				<SelfTile
-					presence={self}
-					stream={joined.stream}
-					context={joined.audioOut.context}
-					mirror={source === "camera"}
-				/>
-				{peers.map((id) => (
-					<PeerTile key={id} id={id} presence={presences[id]} session={joined.session} audioOut={joined.audioOut} />
-				))}
-			</main>
+			<div className="flex min-h-0 flex-1">
+				<main className={`grid flex-1 content-center gap-3 p-4 ${cols}`} data-testid="grid">
+					<SelfTile
+						presence={self}
+						stream={joined.stream}
+						context={joined.audioOut.context}
+						mirror={source === "camera"}
+					/>
+					{peers.map((id) => (
+						<PeerTile key={id} id={id} presence={presences[id]} session={joined.session} audioOut={joined.audioOut} />
+					))}
+				</main>
+				{chatOpen && (
+					<ChatPanel
+						entries={chat}
+						nameOf={(id) => names.current[id] ?? "Someone"}
+						onSend={sendChat}
+						onClose={toggleChat}
+					/>
+				)}
+			</div>
 
 			<footer className="flex justify-center gap-3 border-t border-line bg-surface px-4 py-3">
 				<button
@@ -213,6 +265,24 @@ export function Room({ roomId }: { roomId: string }) {
 				>
 					<CamIcon off={!self.cam} />
 					{self.cam ? "Stop video" : "Start video"}
+				</button>
+				<button
+					type="button"
+					data-testid="toggle-chat"
+					aria-pressed={chatOpen}
+					className="btn-ghost relative"
+					onClick={toggleChat}
+				>
+					<ChatIcon />
+					Chat
+					{unread > 0 && (
+						<span
+							data-testid="unread"
+							className="absolute -top-1.5 -right-1.5 grid min-w-5 place-items-center rounded-full bg-accent px-1 text-[11px] text-white"
+						>
+							{unread > 99 ? "99+" : unread}
+						</span>
+					)}
 				</button>
 				<button type="button" className="btn-danger" onClick={leave}>
 					Leave

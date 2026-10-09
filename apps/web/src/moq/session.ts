@@ -1,7 +1,15 @@
 import { Catalog } from "@moq/hang";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { type Presence, parsePresence, type TokenResponse, Tracks } from "@moq-meeting/shared";
+import {
+	type ChatMessage,
+	MAX_CHAT_LENGTH,
+	type Presence,
+	parseChat,
+	parsePresence,
+	type TokenResponse,
+	Tracks,
+} from "@moq-meeting/shared";
 import { AudioPublisher } from "../media/audio-publisher";
 import { CatalogPublisher } from "../media/catalog";
 import { MediaClock } from "../media/clock";
@@ -12,27 +20,25 @@ import { VideoPublisher } from "../media/video-publisher";
  * goes through here, so library API churn stays contained in this folder.
  *
  * Each participant publishes one broadcast at `<participantId>` holding `catalog.json`,
- * `video`, `audio`, `presence` (name + mic/cam state as a JSON snapshot), and the Phase 0
- * `hello` text track (kept for the headless smoke test).
+ * `video`, `audio`, `presence` (name + mic/cam state as a JSON snapshot), and `chat`
+ * (a lossless JSON stream: one group for the whole session, so late joiners get history).
  * Other participants are discovered from announcements; the UI subscribes to their media
  * through {@link RoomSession.peer}.
  */
 
-export interface HelloMessage {
-	from: string;
-	name: string;
-	text: string;
-	sentAt: number;
-}
-
 export interface SessionEvents {
 	onPeerJoined(participantId: string): void;
 	onPeerLeft(participantId: string): void;
-	onMessage(message: HelloMessage): void;
+	/** A chat message from a peer (including history on join). `from` is their participant ID. */
+	onChat?(from: string, message: ChatMessage): void;
 	/** A peer's latest presence; late joiners get the current value immediately. */
 	onPresence?(participantId: string, presence: Presence): void;
 	onClosed(error?: Error): void;
 }
+
+/** Below audio/video: chat can wait a few ms under congestion; the log itself is lossless. */
+const CHAT_PRIORITY = 40;
+const CHAT_RATE = { max: 5, windowMs: 2000 };
 
 interface Peer {
 	request: Moq.Origin.Requesting;
@@ -46,7 +52,10 @@ export class RoomSession {
 	#origin = new Moq.Origin.Producer();
 	#connection: Moq.Connection.Established | undefined;
 	#broadcast: Moq.Broadcast.Producer | undefined;
-	#hello: Moq.Track.Producer | undefined;
+	#chatTrack: Moq.Track.Producer | undefined;
+	#chat: Json.Stream.Producer<ChatMessage> | undefined;
+	#chatSeq = 0;
+	#chatSent: number[] = [];
 	#publishers: { close(): void }[] = [];
 	#video: VideoPublisher | undefined;
 	#audio: AudioPublisher | undefined;
@@ -86,7 +95,8 @@ export class RoomSession {
 		});
 
 		const broadcast = origin.createBroadcast(Moq.Path.from(this.participantId));
-		this.#hello = broadcast.createTrack(Tracks.hello, { timescale: Moq.Time.Timescale.MILLI });
+		this.#chatTrack = broadcast.createTrack(Tracks.chat, { priority: CHAT_PRIORITY });
+		this.#chat = new Json.Stream.Producer<ChatMessage>({ track: this.#chatTrack, compression: "deflate" });
 		this.#presenceTrack = broadcast.createTrack(Tracks.presence, { priority: Catalog.PRIORITY.text });
 		this.#presenceProducer = new Json.Snapshot.Producer<Presence>({ track: this.#presenceTrack });
 		if (media) this.#publishMedia(broadcast, media);
@@ -147,14 +157,22 @@ export class RoomSession {
 		return this.#connection?.transport ?? "unknown";
 	}
 
-	send(text: string) {
-		if (!this.#hello) throw new Error("not connected");
-		const message: HelloMessage = { from: this.participantId, name: this.name, text, sentAt: Date.now() };
-		// One message per group: a late subscriber starts at the latest group, and nothing
-		// later waits behind an earlier message.
-		const group = this.#hello.appendGroup();
-		group.writeString(JSON.stringify(message));
-		group.close();
+	/**
+	 * Send a chat message; returns it for local echo. Throws if empty or over the rate limit
+	 * (the log is lossless and never rolls, so it's throttled at the source).
+	 */
+	sendChat(text: string): ChatMessage {
+		if (!this.#chat) throw new Error("not connected");
+		const trimmed = text.trim().slice(0, MAX_CHAT_LENGTH);
+		if (!trimmed) throw new Error("empty message");
+		const now = Date.now();
+		this.#chatSent = this.#chatSent.filter((t) => now - t < CHAT_RATE.windowMs);
+		if (this.#chatSent.length >= CHAT_RATE.max) throw new Error("slow down: too many messages");
+		this.#chatSent.push(now);
+
+		const message: ChatMessage = { id: ++this.#chatSeq, text: trimmed, sentAt: now };
+		this.#chat.append(message);
+		return message;
 	}
 
 	async #watchAnnouncements() {
@@ -184,7 +202,7 @@ export class RoomSession {
 				active = request.active.peek();
 			}
 			void this.#readPresence(id, peer, active);
-			void this.#readHello(id, peer, active);
+			void this.#readChat(id, peer, active);
 		})();
 	}
 
@@ -201,19 +219,16 @@ export class RoomSession {
 		}
 	}
 
-	async #readHello(id: string, peer: Peer, broadcast: Moq.Broadcast.Consumer) {
-		const subscriber = broadcast.track(Tracks.hello).subscribe({ priority: 0 });
-		peer.tracks.push(subscriber);
-		for (;;) {
-			const group = await subscriber.recvGroup().catch(() => undefined);
-			if (!group) break;
-			const raw = await group.readString().catch(() => undefined);
-			if (!raw) continue;
-			try {
-				this.#events.onMessage(JSON.parse(raw) as HelloMessage);
-			} catch {
-				console.warn("ignoring malformed hello frame from", id);
+	async #readChat(id: string, peer: Peer, broadcast: Moq.Broadcast.Consumer) {
+		const track = broadcast.track(Tracks.chat).subscribe({ priority: CHAT_PRIORITY });
+		peer.tracks.push(track);
+		try {
+			for await (const value of new Json.Stream.Consumer<unknown>({ track, compression: "deflate" })) {
+				const message = parseChat(value);
+				if (message && this.#peers.has(id)) this.#events.onChat?.(id, message);
 			}
+		} catch (err) {
+			if (this.#peers.has(id)) console.warn("chat track ended", id, err);
 		}
 	}
 
@@ -233,7 +248,8 @@ export class RoomSession {
 		for (const p of this.#publishers) p.close();
 		this.#presenceProducer?.finish();
 		this.#presenceTrack?.close();
-		this.#hello?.close();
+		this.#chat?.finish();
+		this.#chatTrack?.close();
 		this.#broadcast?.close();
 		this.#connection?.close();
 		this.#origin.close();

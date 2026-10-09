@@ -4,7 +4,7 @@
 |---|---|
 | Project | `moq-meeting` — small browser-based meeting app on Media over QUIC |
 | Owner | Rajesh Kumar |
-| Status | Approved with defaults (2026-10-09). Phases 0–2 complete. |
+| Status | Approved with defaults (2026-10-09). Phases 0–3 complete. |
 | Date | 2026-10-09 |
 | References | [doc.moq.dev](https://doc.moq.dev/), [moq-lite concepts](https://doc.moq.dev/concept/moq-lite.html), [hang format](https://doc.moq.dev/concept/hang.html), [relay](https://doc.moq.dev/bin/relay/), [relay auth](https://doc.moq.dev/bin/relay/auth.html), [JS libraries](https://doc.moq.dev/lib/js/), [Bun](https://bun.com/) |
 
@@ -113,7 +113,7 @@ Broadcast      : <participantId>/screen     (phase 4)
 | `video` | H.264 baseline (Annex B) or VP8 frames, hang `legacy` container (varint µs timestamp + payload) | 1 group = 1 GoP, starting with a keyframe (keyframe every 2 s) | 60 (`PRIORITY.video`) | subscriber max-age 500 ms | 1 |
 | `audio` | Opus 48 kHz mono, 20 ms frames, 32 kbps | ~1 s per group | 80 (`PRIORITY.audio`) | subscriber max-age 300 ms | 1 |
 | `presence` | JSON `{name, mic, cam}` via `@moq/json` Snapshot (`screen` added in phase 4) | snapshot opens a group, deltas follow; late joiners read the latest | 90 (`PRIORITY.text`) | latest only | 2 |
-| `chat` | JSON `{id, ts, text}` per frame | hang JSON `mode: "stream"`, one group per session | low | ascending | 3 |
+| `chat` | JSON `{id, text, sentAt}` per frame via `@moq/json` Stream (deflate) | one group for the whole session (never rolls), so a late joiner reads the full log | 40 | lossless, in order | 3 |
 
 The screen broadcast (phase 4) carries `catalog.json` and `video` with a higher resolution and lower frame rate (e.g. 1080p at 5–15 fps) and no audio.
 
@@ -288,8 +288,23 @@ Measured with 3 participants in Chrome tabs on one machine, using the synthetic 
 
 `bun run smoke` now has 8 checks, including presence delivery and late-join state.
 
-## 18. Next steps
+## 18. Phase 3 outcome
 
-1. Manual check, still open: two machines on one LAN with real cameras and speakers. Confirm no echo, record latency, and check that the speaking threshold suits real voices.
-2. Phase 3: chat via `@moq/json` Stream, one track per participant, merged by timestamp.
+| Exit criterion | Result |
+|---|---|
+| Messages delivered to all current participants | Yes (browser, 3 tabs; headless smoke) |
+| Late joiners see the history of currently present participants | A late joiner received all 3 earlier messages in order, with names and an unread badge of 3 |
+
+Details:
+- **Sender identity** is the broadcast path (participant ID), which the relay's JWT check enforces, so it can't be spoofed. Display names come from presence and are cached locally, so messages stay attributed after the sender leaves.
+- **Untrusted input:** records are validated (`parseChat`: integer id, finite timestamp, text trimmed and capped at 1000 chars) and rendered as text. A `<script>` / `<b>` message showed literally.
+- **Rate limit:** 5 messages per 2 s at the sender. The log never rolls, so it has to be bounded at the source.
+- **Ordering:** each sender's log is in order; across senders, messages are merged by the sender's wall clock (ties broken by key).
+- **Known limitation (by design):** when a participant leaves, their log ends with them, so later joiners don't see that person's messages. Persisting chat was declined (intake Q5).
+- The Phase 0 `hello` track is retired, and the smoke test uses chat (10 checks).
+
+## 19. Next steps
+
+1. Manual check, still open: two machines with real cameras and speakers (echo, latency, speaking threshold).
+2. Phase 4: screen share as a second broadcast `<pid>/screen`, plus a spotlight layout.
 3. Switch to the reconnecting `Moq.Connection` handle.

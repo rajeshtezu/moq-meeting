@@ -30,8 +30,6 @@ export function roomPath(roomId: string): string {
 
 /** Track names published inside each participant broadcast. */
 export const Tracks = {
-	/** Phase 0 spike: plain text frames. */
-	hello: "hello",
 	catalog: "catalog.json",
 	video: "video",
 	audio: "audio",
@@ -54,6 +52,27 @@ export function parsePresence(value: unknown): Presence | undefined {
 	const v = value as Record<string, unknown>;
 	if (typeof v.name !== "string" || typeof v.mic !== "boolean" || typeof v.cam !== "boolean") return undefined;
 	return { name: v.name.slice(0, MAX_NAME_LENGTH), mic: v.mic, cam: v.cam };
+}
+
+export const MAX_CHAT_LENGTH = 1000;
+
+/** One record on a participant's `chat` track (a lossless JSON stream). The sender is the broadcast path. */
+export interface ChatMessage {
+	/** Per-sender sequence number; unique together with the sender's participant ID. */
+	id: number;
+	text: string;
+	/** Sender's wall clock, Unix ms. Used to merge everyone's logs into one timeline. */
+	sentAt: number;
+}
+
+/** Validate a chat record from the wire; peers are untrusted. */
+export function parseChat(value: unknown): ChatMessage | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const v = value as Record<string, unknown>;
+	if (!Number.isSafeInteger(v.id) || typeof v.text !== "string" || !Number.isFinite(v.sentAt)) return undefined;
+	const text = v.text.trim().slice(0, MAX_CHAT_LENGTH);
+	if (!text) return undefined;
+	return { id: v.id as number, text, sentAt: v.sentAt as number };
 }
 
 export interface CreateRoomResponse {

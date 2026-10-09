@@ -6,7 +6,7 @@ A small browser-based meeting app on [Media over QUIC](https://doc.moq.dev/), as
 - [Cloud deployment](docs/DEPLOYMENT.md): single VM, real domain, Let's Encrypt
 - [MoQ API notes](docs/notes/moq-api.md): what the spike learned about the libraries
 
-**Status:** Phase 2 done. Multi-party audio + video over WebTransport, display names, mute / camera-off, and speaking indicators.
+**Status:** Phase 3 done. Multi-party audio + video over WebTransport, display names, mute / camera-off, speaking indicators, and room chat with history for late joiners.
 
 Use `?source=test` (or pick "Test pattern & tone" when joining) to try it without a camera, e.g. several tabs on one machine.
 

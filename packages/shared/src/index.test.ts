@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { isValidId, parsePresence, randomId, roomPath } from "./index";
+import { isValidId, MAX_CHAT_LENGTH, parseChat, parsePresence, randomId, roomPath } from "./index";
 
 test("randomId produces valid, distinct ids", () => {
 	const ids = new Set(Array.from({ length: 1000 }, () => randomId()));
@@ -25,5 +25,23 @@ test("parsePresence accepts valid values and truncates long names", () => {
 test("parsePresence rejects malformed values", () => {
 	for (const bad of [null, "alice", 42, {}, { name: 1, mic: true, cam: true }, { name: "a", mic: "yes", cam: true }]) {
 		expect(parsePresence(bad)).toBeUndefined();
+	}
+});
+
+test("parseChat accepts valid records, trims and caps text", () => {
+	expect(parseChat({ id: 1, text: "  hi  ", sentAt: 5 })).toEqual({ id: 1, text: "hi", sentAt: 5 });
+	expect(parseChat({ id: 2, text: "x".repeat(5000), sentAt: 5 })?.text).toHaveLength(MAX_CHAT_LENGTH);
+});
+
+test("parseChat rejects malformed or empty records", () => {
+	for (const bad of [
+		null,
+		"hi",
+		{ id: "1", text: "a", sentAt: 1 },
+		{ id: 1.5, text: "a", sentAt: 1 },
+		{ id: 1, text: "   ", sentAt: 1 },
+		{ id: 1, text: "a" },
+	]) {
+		expect(parseChat(bad)).toBeUndefined();
 	}
 });

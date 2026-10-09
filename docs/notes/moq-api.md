@@ -120,3 +120,13 @@ Findings:
 - The receiver needs no changes: after the cut, `Container.Consumer.next()` reports `continuous: false` and the decoder waits for the keyframe.
 - Speaking detection: RMS of decoded PCM (peers) or `AnalyserNode` time-domain data (self), threshold ≈ 0.008 (−42 dBFS), 400 ms hold.
 - Testing gotcha: the in-app browser's screenshots sometimes show a `<video>` preview as black after switching tabs, even though it's playing (pixels read back fine). It's a capture artifact, not an app bug.
+
+## Chat (Phase 3)
+
+- `@moq/json` `Stream.Producer` / `Stream.Consumer`: a lossless append log in **one group that never rolls**. A late subscriber starts at the latest group, which is the whole log, so history comes for free from the relay cache. Producer and consumer must agree on `compression` (we use `"deflate"`, which compresses each record against the earlier ones).
+- A second group on a stream track makes the consumer throw `Rolled` (a broken publisher). There's no catch-up machinery, so throttle at the source.
+- Sender = broadcast path. Never trust a name or ID inside the record.
+
+## Dev server gotcha
+
+- After many edits to a module, Bun's dev bundler once served a bundle with **both** the old and new copies of `session.ts` (a removed method was still present and a new one was "not a function"). Restarting `bun run dev` fixed it. If behavior doesn't match the source, restart before debugging.

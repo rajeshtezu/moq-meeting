@@ -1,5 +1,5 @@
 /**
- * Phase 0 exit check, headless: two participants exchange a hello frame through the relay,
+ * Headless end-to-end check: participants discover each other, exchange chat and presence,
  * and a token for one room is refused on another. Runs over the relay's WebSocket fallback
  * because Bun has no WebTransport. Works against local dev (`bun run dev`) or a deployment.
  *
@@ -7,8 +7,8 @@
  */
 
 import * as Moq from "@moq/net";
-import type { Presence, TokenResponse } from "@moq-meeting/shared";
-import { type HelloMessage, RoomSession } from "../apps/web/src/moq/session";
+import type { ChatMessage, Presence, TokenResponse } from "@moq-meeting/shared";
+import { RoomSession } from "../apps/web/src/moq/session";
 
 const base = process.argv[2] ?? "http://localhost:3000";
 
@@ -38,7 +38,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 	return Promise.race([p, Bun.sleep(ms).then(() => Promise.reject(new Error(`timed out: ${what}`)))]);
 }
 
-const noop = { onPeerJoined() {}, onPeerLeft() {}, onMessage() {}, onClosed() {} };
+const noop = { onPeerJoined() {}, onPeerLeft() {}, onClosed() {} };
 let failed = false;
 function check(ok: boolean, label: string) {
 	console.log(`${ok ? "PASS" : "FAIL"}  ${label}`);
@@ -51,9 +51,9 @@ const tokenB = await post<TokenResponse>(`/api/rooms/${roomId}/token`, { name: "
 
 // 1. Bob discovers Alice and receives her frame.
 let resolveJoin: (id: string) => void = () => {};
-let resolveMsg: (m: HelloMessage) => void = () => {};
+let resolveMsg: (m: { from: string; message: ChatMessage }) => void = () => {};
 const joined = new Promise<string>((r) => (resolveJoin = r));
-const received = new Promise<HelloMessage>((r) => (resolveMsg = r));
+const received = new Promise<{ from: string; message: ChatMessage }>((r) => (resolveMsg = r));
 
 /** Latest presence per peer, as seen by bob, plus a way to wait for a matching value. */
 const bobSees = new Map<string, Presence>();
@@ -66,7 +66,7 @@ function waitForPresence(pred: (id: string, p: Presence) => boolean): Promise<vo
 const bob = await RoomSession.join(overWebSocket(tokenB), {
 	...noop,
 	onPeerJoined: resolveJoin,
-	onMessage: resolveMsg,
+	onChat: (from, message) => resolveMsg({ from, message }),
 	onPresence: (id, p) => {
 		bobSees.set(id, p);
 		for (const w of presenceWaiters.splice(0))
@@ -79,10 +79,13 @@ const alice = await RoomSession.join(overWebSocket(tokenA), noop);
 const peer = await withTimeout(joined, 5000, "bob sees alice announced");
 check(peer === tokenA.participantId, "bob discovers alice via announcements");
 
-// The subscription starts at the latest group, so keep sending until one lands.
-const sender = setInterval(() => alice.send("hello from alice"), 200);
-const msg = await withTimeout(received, 5000, "bob receives alice's frame").finally(() => clearInterval(sender));
-check(msg.text === "hello from alice" && msg.name === "alice", "bob receives alice's hello frame");
+// Chat is one lossless group per session, so a message sent before bob subscribed still arrives.
+alice.sendChat("hello from alice");
+const msg = await withTimeout(received, 5000, "bob receives alice's chat");
+check(
+	msg.from === tokenA.participantId && msg.message.text === "hello from alice",
+	"bob receives alice's chat message",
+);
 
 // 2. Presence: names arrive, and a mic toggle reaches peers within a second.
 const aliceId = tokenA.participantId;
@@ -104,6 +107,7 @@ check(true, `presence update delivered in ${Math.round(performance.now() - toggl
 // 3. Leaving retracts the announcement, and a late joiner sees current presence.
 let resolveLeft: (id: string) => void = () => {};
 let carolSaw: Presence | undefined;
+const carolChat: string[] = [];
 const left = new Promise<string>((r) => (resolveLeft = r));
 const bob2 = await RoomSession.join(
 	overWebSocket(await post<TokenResponse>(`/api/rooms/${roomId}/token`, { name: "carol" })),
@@ -113,10 +117,23 @@ const bob2 = await RoomSession.join(
 		onPresence: (id, p) => {
 			if (id === aliceId) carolSaw = p;
 		},
+		onChat: (from, m) => {
+			if (from === aliceId) carolChat.push(m.text);
+		},
 	},
 );
 await Bun.sleep(300);
 check(carolSaw?.mic === true && carolSaw.name === "alice", "late joiner gets alice's current presence (mic on)");
+check(carolChat.join("|") === "hello from alice", "late joiner gets alice's chat history");
+
+// Chat is throttled at the source: the log never rolls, so a flood would grow it unbounded.
+let throttled = false;
+try {
+	for (let i = 0; i < 10; i++) alice.sendChat(`spam ${i}`);
+} catch {
+	throttled = true;
+}
+check(throttled, "chat is rate-limited at the sender");
 alice.close();
 check(
 	(await withTimeout(left, 5000, "alice retraction")) === tokenA.participantId,
