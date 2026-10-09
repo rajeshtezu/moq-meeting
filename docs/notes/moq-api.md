@@ -8,7 +8,9 @@ Update this as the libraries change.
 | Package / binary | Version | Notes |
 |---|---|---|
 | `@moq/net` | 0.4.2 | Peer deps `zod` / `@zod/mini` ^4.5 must be installed explicitly |
-| `@moq/hang` | 0.5.2 | Not used yet (Phase 1). Subpath exports: `/catalog`, `/container`, `/util` |
+| `@moq/hang` | 0.5.2 | Catalog, legacy container, consumer buffer |
+| `@moq/json` | 0.4.2 | Snapshot (catalog, later presence) / Stream (later chat) |
+| `tailwindcss` via `bun-plugin-tailwind` | 0.1.2 | `bunfig.toml` for dev; `scripts/build.ts` passes the plugin for prod |
 | `@moq/auth` | 0.2.2 | Wraps `jose` |
 | `moq-relay` | 0.17.x | Homebrew `moq-dev/tap/moq-relay`, apt `moq-relay`, crate `moq-relay` |
 | `moq` CLI | 0.14.x | Formerly `moq-cli` (still the crate name). Provides `moq auth …` |
@@ -68,3 +70,40 @@ Findings:
 
 - `tls.generate = ["localhost"]` + `[web.http]` on the same port: `/certificate.sha256` returns the hex fingerprint, which the Bun server fetches and hands to the client.
 - Harmless warning at startup: `accept failed … listener="web" err=invalid input parameter`. The listener retries and serves fine.
+
+## `@moq/hang` (Phase 1)
+
+```ts
+import { Catalog, Container } from "@moq/hang";
+
+// Publish: Legacy.Producer opens a new group on every keyframe (= one GoP per group).
+const track = broadcast.createTrack("video", Container.trackInfo({ priority: Catalog.PRIORITY.video }));
+const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
+producer.encode(encodedChunk, Time.Micro(pts), chunk.type === "key");   // first frame must be a keyframe
+
+// Catalog: must be written with @moq/json Snapshot, because Catalog.watch reads it with Json.Snapshot.Consumer.
+const catalog = new Json.Snapshot.Producer({ track: broadcast.createTrack(Catalog.TRACK, { priority: Catalog.PRIORITY.catalog }) });
+catalog.update({ video: { renditions: { video: {...} } }, audio: {...}, clock: { wall, timescale: 1000 } });
+
+// Subscribe
+for await (const root of Catalog.watch(broadcastConsumer)) { /* root.video.renditions, root.clock */ }
+const sub = broadcastConsumer.track("video").subscribe({ priority: Catalog.PRIORITY.video, maxAge: Time.Milli(500) });
+const consumer = new Container.Consumer(sub, { format: new Container.Legacy.Format(config), maxAge: Time.Milli(500) });
+const next = await consumer.next();   // { frame?: { payload, timestamp, keyframe }, group, continuous, ... }
+```
+
+Findings:
+- **The rendition key is the track name** (`renditions: { video: {...} }` means subscribe to track `video`), matching `@moq/watch`.
+- `PRIORITY` = catalog 100, text 90, audio 80, video 60. Used as-is.
+- H.264 with `avc: { format: "annexb" }` puts SPS/PPS inline in every keyframe, so the catalog needs no `description` and late joiners decode from any group. `@moq/publish` does the same.
+- `next.continuous === false` (a skipped group or a playhead jump) means waiting for the next keyframe before decoding again.
+- **Timestamps:** capture clocks are rebased onto one session clock (µs since join), and the catalog `clock.wall` gives PTS 0's wall time, so receivers measure latency as `Date.now() - wall(pts)`. The offset is pinned when the first frame is *read* from `MediaStreamTrackProcessor`, but that frame may have sat in the processor's queue, so the meter reads up to about one frame low (we saw −15 to −35 ms on localhost). Good enough for a POC. A tighter anchor would need capture timestamps on a known clock.
+- `canvas.captureStream()` frames start at timestamp 0. A camera's start time is arbitrary too, so always rebase.
+- Main-thread timers and rAF are throttled in background tabs, so the test pattern ticks from a Worker to keep multi-tab tests smooth.
+- Bun HMR doesn't hot-swap these modules, so editing media code triggers a full reload of every open tab (and they leave the room).
+
+## Audio playout
+
+- Like `@moq/watch`: decoded PCM goes to an AudioWorklet jitter buffer, then to `AudioContext.destination` (48 kHz). The buffer starts at 60 ms, and when it exceeds 200 ms it skips back to 80 ms.
+- The AudioContext is created inside the Join click (autoplay policy).
+- Echo cancellation relies on Chrome's tab-wide AEC covering Web Audio output. **Not yet verified with real speakers.**

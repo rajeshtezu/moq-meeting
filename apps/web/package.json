@@ -4,10 +4,12 @@
 	"type": "module",
 	"dependencies": {
 		"@moq-meeting/shared": "workspace:*",
+		"@moq/hang": "0.5.2",
+		"@moq/json": "0.4.2",
 		"@moq/net": "0.4.2",
+		"@zod/mini": "4.6.5",
 		"react": "19.3.0",
 		"react-dom": "19.3.0",
-		"zod": "4.6.5",
-		"@zod/mini": "4.6.5"
+		"zod": "4.6.5"
 	}
 }

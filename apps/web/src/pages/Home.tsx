@@ -1,5 +1,6 @@
 import { type FormEvent, useState } from "react";
 import { createRoom, savedName, saveName } from "../api";
+import { Card } from "../components/Card";
 
 export function Home() {
 	const [name, setName] = useState(savedName);
@@ -12,7 +13,7 @@ export function Home() {
 		try {
 			saveName(name.trim());
 			const { roomId } = await createRoom();
-			window.location.assign(`/room/${roomId}`);
+			window.location.assign(`/room/${roomId}${window.location.search}`);
 		} catch (err) {
 			setError(String(err));
 			setBusy(false);
@@ -20,18 +21,23 @@ export function Home() {
 	}
 
 	return (
-		<main className="card">
-			<h1>MoQ Meeting</h1>
-			<form onSubmit={onSubmit}>
-				<label>
+		<Card title="MoQ Meeting">
+			<form onSubmit={onSubmit} className="grid gap-4">
+				<label className="grid gap-1.5 text-sm text-muted">
 					Your name
-					<input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} required />
+					<input
+						className="field text-neutral-100"
+						value={name}
+						onChange={(e) => setName(e.target.value)}
+						maxLength={40}
+						required
+					/>
 				</label>
-				<button type="submit" disabled={busy || !name.trim()}>
+				<button type="submit" className="btn-primary" disabled={busy || !name.trim()}>
 					Create room
 				</button>
 			</form>
-			{error && <p className="error">{error}</p>}
-		</main>
+			{error && <p className="mt-4 text-sm text-bad">{error}</p>}
+		</Card>
 	);
 }

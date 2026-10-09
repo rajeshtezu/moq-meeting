@@ -1,129 +1,33 @@
-:root {
-	--bg: #f6f7f9;
-	--surface: #ffffff;
-	--text: #1b1f24;
-	--muted: #5b6470;
-	--border: #d9dde3;
-	--accent: #2563eb;
-	--ok: #15803d;
-	--bad: #b91c1c;
-	color-scheme: light dark;
-	font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+@import "tailwindcss";
+
+@theme {
+	--color-surface: oklch(0.21 0.01 260);
+	--color-surface-2: oklch(0.26 0.012 260);
+	--color-line: oklch(0.32 0.012 260);
+	--color-muted: oklch(0.7 0.01 260);
+	--color-accent: oklch(0.62 0.17 255);
+	--color-ok: oklch(0.72 0.17 150);
+	--color-bad: oklch(0.65 0.2 25);
 }
 
-@media (prefers-color-scheme: dark) {
-	:root {
-		--bg: #0f1216;
-		--surface: #171b21;
-		--text: #e6e9ee;
-		--muted: #98a1ad;
-		--border: #2a3039;
-		--accent: #60a5fa;
-		--ok: #4ade80;
-		--bad: #f87171;
-	}
-}
-
-* {
-	box-sizing: border-box;
-}
-
+html,
 body {
-	margin: 0;
-	min-height: 100vh;
-	background: var(--bg);
-	color: var(--text);
-	display: grid;
-	place-items: start center;
-	padding: 48px 16px;
+	@apply min-h-full bg-neutral-950 text-neutral-100 antialiased;
+	font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-.card {
-	width: 100%;
-	max-width: 420px;
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: 12px;
-	padding: 24px;
+@utility btn {
+	@apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50;
 }
-.card.wide {
-	max-width: 720px;
+.btn-primary {
+	@apply btn bg-accent text-white hover:brightness-110;
 }
-
-h1 {
-	font-size: 1.25rem;
-	margin: 0 0 16px;
+.btn-ghost {
+	@apply btn border border-line bg-surface-2 text-neutral-100 hover:bg-line;
 }
-h2 {
-	font-size: 1rem;
-	margin: 24px 0 8px;
+.btn-danger {
+	@apply btn bg-bad text-white hover:brightness-110;
 }
-
-header {
-	display: flex;
-	justify-content: space-between;
-	align-items: baseline;
-	gap: 12px;
-	flex-wrap: wrap;
-}
-
-form {
-	display: grid;
-	gap: 12px;
-}
-form.row {
-	grid-template-columns: 1fr auto;
-}
-label {
-	display: grid;
-	gap: 6px;
-	font-size: 0.875rem;
-	color: var(--muted);
-}
-
-input,
-button {
-	font: inherit;
-	padding: 8px 12px;
-	border-radius: 8px;
-	border: 1px solid var(--border);
-	background: var(--bg);
-	color: var(--text);
-}
-button {
-	background: var(--accent);
-	color: white;
-	border: none;
-	cursor: pointer;
-}
-button:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-
-.status {
-	font-size: 0.875rem;
-	color: var(--muted);
-}
-.status.connected {
-	color: var(--ok);
-}
-.status.error {
-	color: var(--bad);
-}
-
-.muted {
-	color: var(--muted);
-	font-size: 0.875rem;
-	overflow-wrap: anywhere;
-}
-.error {
-	color: var(--bad);
-}
-.messages {
-	min-height: 80px;
-}
-ul {
-	padding-left: 20px;
-	margin: 0;
+.field {
+	@apply w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent;
 }

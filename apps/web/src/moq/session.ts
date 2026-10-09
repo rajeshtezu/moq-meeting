@@ -1,12 +1,18 @@
 import * as Moq from "@moq/net";
 import { type TokenResponse, Tracks } from "@moq-meeting/shared";
+import { AudioPublisher } from "../media/audio-publisher";
+import { CatalogPublisher } from "../media/catalog";
+import { MediaClock } from "../media/clock";
+import { VideoPublisher } from "../media/video-publisher";
 
 /**
  * Thin adapter around `@moq/net` for one room session. Everything the app does with MoQ
  * goes through here, so library API churn stays contained in this folder.
  *
- * Phase 0 scope: publish our own broadcast with a `hello` text track, discover the other
- * participants from announcements, and read their `hello` tracks.
+ * Each participant publishes one broadcast at `<participantId>` holding `catalog.json`,
+ * `video`, `audio`, and the Phase 0 `hello` text track (kept for the headless smoke test).
+ * Other participants are discovered from announcements; the UI subscribes to their media
+ * through {@link RoomSession.peer}.
  */
 
 export interface HelloMessage {
@@ -31,6 +37,8 @@ export class RoomSession {
 	#connection: Moq.Connection.Established | undefined;
 	#broadcast: Moq.Broadcast.Producer | undefined;
 	#hello: Moq.Track.Producer | undefined;
+	#publishers: { close(): void }[] = [];
+	readonly clock = new MediaClock();
 	#peers = new Map<string, { request: Moq.Origin.Requesting; subscriber?: Moq.Track.Subscriber }>();
 	#events: SessionEvents;
 	#closed = false;
@@ -41,13 +49,14 @@ export class RoomSession {
 		this.#events = events;
 	}
 
-	static async join(token: TokenResponse, events: SessionEvents): Promise<RoomSession> {
+	/** Join the room, publishing `media` (camera/mic or test source) if given. */
+	static async join(token: TokenResponse, events: SessionEvents, media?: MediaStream): Promise<RoomSession> {
 		const session = new RoomSession(token, events);
-		await session.#connect(token);
+		await session.#connect(token, media);
 		return session;
 	}
 
-	async #connect(token: TokenResponse) {
+	async #connect(token: TokenResponse, media?: MediaStream) {
 		const origin = this.#origin;
 		this.#connection = await Moq.Connection.connect({
 			url: new URL(token.relayUrl),
@@ -62,11 +71,27 @@ export class RoomSession {
 
 		const broadcast = origin.createBroadcast(Moq.Path.from(this.participantId));
 		this.#hello = broadcast.createTrack(Tracks.hello, { timescale: Moq.Time.Timescale.MILLI });
+		if (media) this.#publishMedia(broadcast, media);
 		broadcast.announce();
 		this.#broadcast = broadcast;
 
 		void this.#watchAnnouncements();
 		void this.#connection.closed.then((err) => this.close(err ?? undefined));
+	}
+
+	#publishMedia(broadcast: Moq.Broadcast.Producer, media: MediaStream) {
+		// The catalog is updated as each encoder reports its decoder config.
+		const catalog = new CatalogPublisher(broadcast, this.clock);
+		this.#publishers.push(catalog);
+		const [video] = media.getVideoTracks();
+		if (video) this.#publishers.push(new VideoPublisher(video, broadcast, this.clock, (r) => catalog.setVideo(r)));
+		const [audio] = media.getAudioTracks();
+		if (audio) this.#publishers.push(new AudioPublisher(audio, broadcast, this.clock, (r) => catalog.setAudio(r)));
+	}
+
+	/** The broadcast request for a discovered participant, for subscribing to their media. */
+	peer(participantId: string): Moq.Origin.Requesting | undefined {
+		return this.#peers.get(participantId)?.request;
 	}
 
 	/** Transport actually in use; WebSocket means we fell back from WebTransport. */
@@ -140,6 +165,7 @@ export class RoomSession {
 		if (this.#closed) return;
 		this.#closed = true;
 		for (const id of [...this.#peers.keys()]) this.#removePeer(id);
+		for (const p of this.#publishers) p.close();
 		this.#hello?.close();
 		this.#broadcast?.close();
 		this.#connection?.close();

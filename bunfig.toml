@@ -1,0 +1,4 @@
+# Tailwind for the dev server's HTML imports (Bun.serve). Production builds pass the
+# same plugin explicitly in scripts/build.ts.
+[serve.static]
+plugins = ["bun-plugin-tailwind"]

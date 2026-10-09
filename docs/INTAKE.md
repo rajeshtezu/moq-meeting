@@ -4,7 +4,7 @@
 |---|---|
 | Project | `moq-meeting` — small browser-based meeting app on Media over QUIC |
 | Owner | Rajesh Kumar |
-| Status | Approved with defaults (2026-10-09). Phase 0 complete. |
+| Status | Approved with defaults (2026-10-09). Phases 0 and 1 complete. |
 | Date | 2026-10-09 |
 | References | [doc.moq.dev](https://doc.moq.dev/), [moq-lite concepts](https://doc.moq.dev/concept/moq-lite.html), [hang format](https://doc.moq.dev/concept/hang.html), [relay](https://doc.moq.dev/bin/relay/), [relay auth](https://doc.moq.dev/bin/relay/auth.html), [JS libraries](https://doc.moq.dev/lib/js/), [Bun](https://bun.com/) |
 
@@ -109,9 +109,9 @@ Broadcast      : <participantId>/screen     (phase 4)
 
 | Track | Content | Group semantics | Priority | Order / max-age | Phase |
 |---|---|---|---|---|---|
-| `catalog.json` | hang catalog (renditions + decoder config + app section) | updates replace the previous group | high | latest only | 1 |
-| `video` | H.264 or VP8 frames, hang `legacy` container (varint µs timestamp + payload) | 1 group = 1 GoP, starting with a keyframe (keyframe every ~2 s) | 50 | newest-first, ~2 s | 1 |
-| `audio` | Opus 48 kHz mono, 20 ms frames | ~1 s per group | 100 | ascending, ~500 ms | 1 |
+| `catalog.json` | hang catalog (renditions + decoder config + `clock`), written with `@moq/json` Snapshot | snapshot opens a group, deltas follow | 100 (`PRIORITY.catalog`) | latest only | 1 |
+| `video` | H.264 baseline (Annex B) or VP8 frames, hang `legacy` container (varint µs timestamp + payload) | 1 group = 1 GoP, starting with a keyframe (keyframe every 2 s) | 60 (`PRIORITY.video`) | subscriber max-age 500 ms | 1 |
+| `audio` | Opus 48 kHz mono, 20 ms frames, 32 kbps | ~1 s per group | 80 (`PRIORITY.audio`) | subscriber max-age 300 ms | 1 |
 | `presence` | JSON `{name, mic, cam, screen}` | new group on every change (late joiners read the latest) | high | latest only | 2 |
 | `chat` | JSON `{id, ts, text}` per frame | hang JSON `mode: "stream"`, one group per session | low | ascending | 3 |
 
@@ -258,7 +258,25 @@ Exit criteria met:
 
 Learnings that changed the design are recorded in [notes/moq-api.md](notes/moq-api.md). The main one is that the publish claim is just `<participantId>/**`.
 
-## 16. Next steps
+## 16. Phase 1 outcome
 
-1. Phase 1 tasks: capture/encode, catalog + video/audio publish, subscribe/decode, canvas render, AudioWorklet playout with an echo-cancellation spike first, grid layout, and Tailwind.
-2. Switch to the reconnecting `Moq.Connection` handle.
+Built on `@moq/net` + `@moq/hang` building blocks (`Container.Legacy.Producer`, `Container.Consumer`, `Catalog.watch`, `@moq/json` Snapshot), with our own capture, WebCodecs, render and playout code.
+
+Measured with 3 participants in Chrome tabs on one machine, using the synthetic test source:
+
+| Exit criterion | Result |
+|---|---|
+| 3–4 participants see and hear each other | 3 participants, full mesh: 30 fps, H.264 360p, audio flowing (level meter) to every peer |
+| Latency under 500 ms on LAN | Under about one frame (~15–35 ms) on localhost. The meter carries a one-frame offset error (see notes); there is no relay hop latency to speak of locally. |
+| Tiles appear and disappear on join and leave | Leave removed the tile in under 20 ms. A late joiner drew the first frame from 2 peers **79 ms** after clicking Join (relay serves the current GoP from cache). |
+| Join-to-first-frame < 1.5 s | 79 ms locally |
+
+**Not yet verified:**
+- **Real camera/mic and echo cancellation with speakers.** This needs a person in the room. Playout follows `@moq/watch` (AudioWorklet → destination) and relies on Chrome's tab-wide AEC. If echo shows up, the fallback is routing playout through a `MediaStreamTrackGenerator` → `<audio>` element.
+- Behavior under congestion (phase 5), and cross-machine LAN latency.
+
+## 17. Next steps
+
+1. Manual check: two machines on one LAN with real cameras and speakers. Confirm no echo, and record latency.
+2. Phase 2: presence track (names, mic/cam state) via `@moq/json` Snapshot, mute/camera-off, active-speaker highlight from the audio level that's already computed.
+3. Switch to the reconnecting `Moq.Connection` handle.
