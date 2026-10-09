@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+# Signing keys are generated per environment (`bun run keys`); never commit them.
+infra/keys/*.jwk

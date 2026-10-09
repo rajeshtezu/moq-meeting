@@ -1,0 +1,9 @@
+{
+	"name": "@moq-meeting/server",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@moq-meeting/shared": "workspace:*",
+		"@moq/auth": "0.2.2"
+	}
+}

@@ -1,0 +1,31 @@
+{
+	"name": "moq-meeting",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"apps/*",
+		"packages/*"
+	],
+	"scripts": {
+		"dev": "bun scripts/dev.ts",
+		"start": "cd dist && NODE_ENV=production MOQ_PRIVATE_KEY_FILE=${MOQ_PRIVATE_KEY_FILE:-../infra/keys/private.jwk} bun apps/server/src/index.js",
+		"build": "bun build apps/server/src/index.ts --target=bun --outdir=dist --root=. --public-path=/ --minify",
+		"keys": "moq auth generate --algorithm ES256 --out infra/keys/private.jwk --public infra/keys/public.jwk",
+		"smoke": "bun scripts/smoke.ts",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit -p .",
+		"lint": "biome check .",
+		"format": "biome format --write ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.15",
+		"@moq-meeting/shared": "workspace:*",
+		"@moq/net": "0.4.2",
+		"@types/bun": "1.4.2",
+		"@types/react": "19.3.0",
+		"@types/react-dom": "19.3.0",
+		"@zod/mini": "4.6.5",
+		"typescript": "5.9.3",
+		"zod": "4.6.5"
+	}
+}

@@ -1,0 +1,8 @@
+[Unit]
+Description=Copy Caddy's relay certificate where moq-relay can read it
+
+[Service]
+Type=oneshot
+Environment=SRC=/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/relay.example.com
+ExecStart=/usr/bin/install -o moq -g moq -m 0644 ${SRC}/relay.example.com.crt /etc/moq/tls/relay.crt
+ExecStart=/usr/bin/install -o moq -g moq -m 0600 ${SRC}/relay.example.com.key /etc/moq/tls/relay.key

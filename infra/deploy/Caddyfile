@@ -1,0 +1,20 @@
+# /etc/caddy/Caddyfile. Replace example.com with your domain.
+{
+	email ops@example.com
+	servers {
+		# UDP 443 belongs to moq-relay (QUIC), so Caddy must not serve HTTP/3.
+		protocols h1 h2
+	}
+}
+
+# Bun app server: web UI + /api (token minting).
+meet.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3000
+}
+
+# Relay hostname on TCP: obtains the certificate moq-relay also uses for QUIC,
+# and proxies the WebSocket fallback. No access log: URLs carry ?jwt= tokens.
+relay.example.com {
+	reverse_proxy 127.0.0.1:4080
+}

@@ -1,0 +1,13 @@
+{
+	"name": "@moq-meeting/web",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@moq-meeting/shared": "workspace:*",
+		"@moq/net": "0.4.2",
+		"react": "19.3.0",
+		"react-dom": "19.3.0",
+		"zod": "4.6.5",
+		"@zod/mini": "4.6.5"
+	}
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=MoQ Meeting app server (Bun)
+After=network-online.target
+
+[Service]
+User=moq
+WorkingDirectory=/opt/moq-meeting/dist
+ExecStart=/usr/local/bin/bun apps/server/src/index.js
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=RELAY_URL=https://relay.example.com
+Environment=MOQ_PRIVATE_KEY_FILE=/etc/moq/keys/private.jwk
+Environment=TOKEN_TTL_SECONDS=14400
+Restart=always
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

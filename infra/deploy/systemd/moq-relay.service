@@ -1,0 +1,20 @@
+[Unit]
+Description=MoQ relay
+After=network-online.target moq-auth.service
+Wants=moq-auth.service
+
+[Service]
+User=moq
+ExecStart=/usr/bin/moq-relay /etc/moq/relay.toml
+Environment=RUST_LOG=info
+# Bind UDP 443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Restart=always
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

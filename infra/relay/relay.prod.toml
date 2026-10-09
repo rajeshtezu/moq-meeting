@@ -1,0 +1,19 @@
+# Production relay, installed at /etc/moq/relay.toml. See docs/DEPLOYMENT.md.
+
+# QUIC / WebTransport on UDP 443 with a publicly trusted certificate.
+# Files are watched and reloaded for new connections, so renewals need no restart.
+[listen]
+bind = "[::]:443"
+
+[listen.tls]
+cert = "/etc/moq/tls/relay.crt"
+key = "/etc/moq/tls/relay.key"
+
+# WebSocket fallback (Safari, Firefox < 153, UDP-blocked networks) as plain HTTP on
+# loopback; Caddy terminates TLS on TCP 443 and proxies relay.<domain> here.
+[web.http]
+listen = "127.0.0.1:4080"
+
+# Tokens are verified by `moq auth serve` (moq-auth.service) on loopback.
+[auth]
+url = "http://127.0.0.1:4440/"
