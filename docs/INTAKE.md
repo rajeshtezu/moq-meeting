@@ -4,7 +4,7 @@
 |---|---|
 | Project | `moq-meeting` — small browser-based meeting app on Media over QUIC |
 | Owner | Rajesh Kumar |
-| Status | Approved with defaults (2026-10-09). Phases 0–3 complete. |
+| Status | Approved with defaults (2026-10-09). Phases 0–4 complete. |
 | Date | 2026-10-09 |
 | References | [doc.moq.dev](https://doc.moq.dev/), [moq-lite concepts](https://doc.moq.dev/concept/moq-lite.html), [hang format](https://doc.moq.dev/concept/hang.html), [relay](https://doc.moq.dev/bin/relay/), [relay auth](https://doc.moq.dev/bin/relay/auth.html), [JS libraries](https://doc.moq.dev/lib/js/), [Bun](https://bun.com/) |
 
@@ -112,10 +112,10 @@ Broadcast      : <participantId>/screen     (phase 4)
 | `catalog.json` | hang catalog (renditions + decoder config + `clock`), written with `@moq/json` Snapshot | snapshot opens a group, deltas follow | 100 (`PRIORITY.catalog`) | latest only | 1 |
 | `video` | H.264 baseline (Annex B) or VP8 frames, hang `legacy` container (varint µs timestamp + payload) | 1 group = 1 GoP, starting with a keyframe (keyframe every 2 s) | 60 (`PRIORITY.video`) | subscriber max-age 500 ms | 1 |
 | `audio` | Opus 48 kHz mono, 20 ms frames, 32 kbps | ~1 s per group | 80 (`PRIORITY.audio`) | subscriber max-age 300 ms | 1 |
-| `presence` | JSON `{name, mic, cam}` via `@moq/json` Snapshot (`screen` added in phase 4) | snapshot opens a group, deltas follow; late joiners read the latest | 90 (`PRIORITY.text`) | latest only | 2 |
+| `presence` | JSON `{name, mic, cam}` via `@moq/json` Snapshot (screen-share state comes from the `<pid>/screen` announcement, not presence) | snapshot opens a group, deltas follow; late joiners read the latest | 90 (`PRIORITY.text`) | latest only | 2 |
 | `chat` | JSON `{id, text, sentAt}` per frame via `@moq/json` Stream (deflate) | one group for the whole session (never rolls), so a late joiner reads the full log | 40 | lossless, in order | 3 |
 
-The screen broadcast (phase 4) carries `catalog.json` and `video` with a higher resolution and lower frame rate (e.g. 1080p at 5–15 fps) and no audio.
+The screen broadcast (phase 4) at `<pid>/screen` carries `catalog.json` and `video`: up to 1920×1080 at 15 fps, 2 Mbps, H.264 level 4.0 (`avc1.42E028`) with VP8 fallback, a keyframe every 3 s, `contentHint: "detail"`, and no audio. Subscribers allow 1.5 s max-age for its large keyframes.
 
 > **Design choice to validate in the spike:** presence could live as a custom section in `catalog.json` instead of a separate track. A separate track keeps the catalog purely about media. This doc assumes the separate track.
 
@@ -303,8 +303,24 @@ Details:
 - **Known limitation (by design):** when a participant leaves, their log ends with them, so later joiners don't see that person's messages. Persisting chat was declined (intake Q5).
 - The Phase 0 `hello` track is retired, and the smoke test uses chat (10 checks).
 
-## 19. Next steps
+## 19. Phase 4 outcome
 
-1. Manual check, still open: two machines with real cameras and speakers (echo, latency, speaking threshold).
-2. Phase 4: screen share as a second broadcast `<pid>/screen`, plus a spotlight layout.
-3. Switch to the reconnecting `Moq.Connection` handle.
+| Exit criterion | Result |
+|---|---|
+| Shared screen readable at 1080p | Received at **1920×1080, 13–16 fps**. The 16 px "small print" on the synthetic slide stays legible even scaled down in an 800 px window. |
+| Camera keeps working at the same time | Camera tiles stayed at 30 fps / 360p while a 1080p share was live |
+| Start / stop | First screen frame at a peer ≤ 0.5 s after clicking Share (an upper bound: polling started late). Stop retracts the announcement and the stage leaves in under 1 s. Stopping from the browser's own "Stop sharing" bar (track `ended`) does the same. |
+| Spotlight layout | The share goes on the big stage with participants in a strip (side on wide screens, below on narrow). With several shares, a switcher appears and the newest share takes the stage. |
+
+Details:
+- **Discovery:** the share is a second broadcast `<pid>/screen`, already covered by the `<pid>/**` publish grant. Peers learn of it from announcements, so presence needs no `screen` flag, and a crashed tab's share vanishes with its session.
+- **Resizing:** the video publisher now takes a profile (`CAMERA` / `SCREEN`) and reconfigures its encoder when the frame size changes (a shared window resized), forcing a keyframe and updating the catalog.
+- **Capture:** `getDisplayMedia` is capped at 1080p15 in the constraints, so the encoder never has to scale. With `?source=test`, a synthetic 1080p slide replaces the picker.
+- **Smoke test:** now 12 checks, including share announce and retract.
+
+**Not yet verified:** a real `getDisplayMedia` capture (needs the user's picker), resizing a real shared window, and screen share under constrained bandwidth.
+
+## 20. Next steps
+
+1. Manual check, still open: two machines with real cameras, speakers and a real screen share (echo, latency, speaking threshold, window resize).
+2. Phase 5 (optional hardening): network throttling tests, a stats overlay with dropped groups, a lower rendition or adaptive bitrate, a Firefox check, and the reconnecting `Moq.Connection` handle.

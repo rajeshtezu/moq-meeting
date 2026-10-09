@@ -5,47 +5,74 @@ import { Tracks } from "@moq-meeting/shared";
 import { toHex, type VideoRendition } from "./catalog";
 import { type MediaClock, Rebase } from "./clock";
 
-/** Phase 1 encoding ladder: one 360p rendition. */
-export const VIDEO = {
+export interface VideoProfile {
+	/** Capture constraints; the encoder is sized from the actual frames. */
+	width: number;
+	height: number;
+	framerate: number;
+	bitrate: number;
+	/** A keyframe (and so a new group) this often bounds join time and loss recovery. */
+	keyframeIntervalUs: number;
+	/** Tried in order; the first the browser can encode wins. */
+	codecs: Pick<VideoEncoderConfig, "codec" | "avc">[];
+	contentHint?: "motion" | "detail" | "text";
+}
+
+/** Camera: one 360p rendition. H.264 baseline first (hardware-friendly), VP8 fallback (intake Q3). */
+export const CAMERA: VideoProfile = {
 	width: 640,
 	height: 360,
 	framerate: 30,
 	bitrate: 800_000,
-	/** A keyframe (and so a new group) every 2 s bounds join time and loss recovery. */
 	keyframeIntervalUs: 2_000_000,
-} as const;
+	codecs: [{ codec: "avc1.42E01F", avc: { format: "annexb" } }, { codec: "vp8" }],
+	contentHint: "motion",
+};
 
-/** H.264 baseline first (hardware-friendly), VP8 as the fallback (intake Q3). */
-const CODECS: Pick<VideoEncoderConfig, "codec" | "avc">[] = [
-	{ codec: "avc1.42E01F", avc: { format: "annexb" } },
-	{ codec: "vp8" },
-];
+/**
+ * Screen share: up to 1080p at a low frame rate. Text needs resolution more than motion, so
+ * more bits per frame. H.264 level 4.0 covers 1920×1080.
+ */
+export const SCREEN: VideoProfile = {
+	width: 1920,
+	height: 1080,
+	framerate: 15,
+	bitrate: 2_000_000,
+	keyframeIntervalUs: 3_000_000,
+	codecs: [{ codec: "avc1.42E028", avc: { format: "annexb" } }, { codec: "vp8" }],
+	contentHint: "detail",
+};
 
-async function pickCodec(width: number, height: number): Promise<VideoEncoderConfig> {
-	for (const candidate of CODECS) {
+async function pickCodec(profile: VideoProfile, width: number, height: number): Promise<VideoEncoderConfig> {
+	for (const candidate of profile.codecs) {
 		const config: VideoEncoderConfig = {
 			...candidate,
 			width,
 			height,
-			bitrate: VIDEO.bitrate,
-			framerate: VIDEO.framerate,
+			bitrate: profile.bitrate,
+			framerate: profile.framerate,
 			latencyMode: "realtime",
 		};
 		const { supported } = await VideoEncoder.isConfigSupported(config);
 		if (supported) return config;
 	}
-	throw new Error("no supported video encoder (tried H.264, VP8)");
+	throw new Error(
+		`no supported video encoder for ${width}x${height} (tried ${profile.codecs.map((c) => c.codec).join(", ")})`,
+	);
 }
 
 /**
- * Camera track → VideoEncoder → hang legacy container on the `video` track.
+ * Video track (camera or screen) → VideoEncoder → hang legacy container on the `video` track.
  * `Legacy.Producer` starts a new MoQ group at every keyframe, so each group is one GoP.
+ * If the frame size changes (a shared window is resized), the encoder is reconfigured and
+ * the catalog updated; the next frame is a keyframe.
  */
 export class VideoPublisher {
 	readonly #producer: Container.Legacy.Producer;
 	readonly #source: MediaStreamTrack;
 	readonly #rebase: Rebase;
 	readonly #onRendition: (r: VideoRendition) => void;
+	readonly #profile: VideoProfile;
 	#reader: ReadableStreamDefaultReader<VideoFrame> | undefined;
 	#encoder: VideoEncoder | undefined;
 	#enabled = true;
@@ -57,8 +84,11 @@ export class VideoPublisher {
 		broadcast: Moq.Broadcast.Producer,
 		clock: MediaClock,
 		onRendition: (r: VideoRendition) => void,
+		profile: VideoProfile = CAMERA,
 	) {
 		this.#source = source;
+		this.#profile = profile;
+		if (profile.contentHint) source.contentHint = profile.contentHint;
 		this.#rebase = new Rebase(clock);
 		this.#onRendition = onRendition;
 		const track = broadcast.createTrack(Tracks.video, Container.trackInfo({ priority: Catalog.PRIORITY.video }));
@@ -71,7 +101,7 @@ export class VideoPublisher {
 	async #run() {
 		this.#reader = new MediaStreamTrackProcessor<VideoFrame>({ track: this.#source }).readable.getReader();
 		let lastKeyframe = Number.NEGATIVE_INFINITY;
-		let pendingConfig: VideoEncoderConfig | undefined;
+		let size = "";
 
 		for (;;) {
 			const { value: frame, done } = await this.#reader.read();
@@ -83,12 +113,18 @@ export class VideoPublisher {
 			// advertised timestamps, and so measured latency, include encoding.
 			this.#rebase.apply(frame.timestamp);
 
-			if (!this.#encoder) {
-				// Size the encoder from the first frame; H.264 needs even dimensions.
-				const width = frame.displayWidth & ~1;
-				const height = frame.displayHeight & ~1;
-				pendingConfig = await pickCodec(width, height);
-				this.#encoder = this.#createEncoder(pendingConfig);
+			// Size the encoder from the frames (H.264 needs even dimensions), and reconfigure
+			// if they change, e.g. a shared window being resized.
+			const width = frame.displayWidth & ~1;
+			const height = frame.displayHeight & ~1;
+			if (!this.#encoder || `${width}x${height}` !== size) {
+				size = `${width}x${height}`;
+				if (this.#encoder?.state === "configured") {
+					await this.#encoder.flush().catch(() => {});
+					this.#encoder.close();
+				}
+				this.#encoder = this.#createEncoder(await pickCodec(this.#profile, width, height));
+				this.#forceKeyframe = true;
 			}
 
 			// Camera off: the track is disabled and yields black frames; send nothing.
@@ -103,7 +139,7 @@ export class VideoPublisher {
 				continue;
 			}
 
-			const keyFrame = this.#forceKeyframe || frame.timestamp - lastKeyframe >= VIDEO.keyframeIntervalUs;
+			const keyFrame = this.#forceKeyframe || frame.timestamp - lastKeyframe >= this.#profile.keyframeIntervalUs;
 			this.#forceKeyframe = false;
 			if (keyFrame) lastKeyframe = frame.timestamp;
 			this.#encoder.encode(frame, { keyFrame });
@@ -119,8 +155,8 @@ export class VideoPublisher {
 						codec: meta.decoderConfig.codec,
 						codedWidth: meta.decoderConfig.codedWidth ?? config.width,
 						codedHeight: meta.decoderConfig.codedHeight ?? config.height,
-						framerate: VIDEO.framerate,
-						bitrate: VIDEO.bitrate,
+						framerate: this.#profile.framerate,
+						bitrate: this.#profile.bitrate,
 						description: toHex(meta.decoderConfig.description),
 						optimizeForLatency: true,
 						container: { kind: "legacy" },

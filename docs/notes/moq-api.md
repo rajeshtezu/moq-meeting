@@ -130,3 +130,11 @@ Findings:
 ## Dev server gotcha
 
 - After many edits to a module, Bun's dev bundler once served a bundle with **both** the old and new copies of `session.ts` (a removed method was still present and a new one was "not a function"). Restarting `bun run dev` fixed it. If behavior doesn't match the source, restart before debugging.
+
+## Screen share (Phase 4)
+
+- A second broadcast per participant at `Moq.Path.from(pid, "screen")`. Announcements arrive with prefix `<pid>/screen`, so split on `/`. `broadcast.close()` retracts it.
+- `VideoEncoder` is sized from actual frames. On a size change: `flush()`, `close()`, reconfigure, force a keyframe. The new decoder config lands in the catalog, and receivers restart their decoder because the rendition JSON changed.
+- `getDisplayMedia` constraints (`max` width/height/frameRate) make Chrome downscale at capture, which is simpler than encoder-side scaling.
+- A track's `ended` event fires when the user clicks the browser's "Stop sharing" bar, but not on `track.stop()`. To test it, dispatch `new Event("ended")` on the track.
+- Restarting `bun run dev` under open tabs leaves stale errors in their console buffer (WebTransport "Connection lost", an HMR socket failure, a Bun "Failed to load bundled module"). They persist across reloads in the in-app browser, so hook `console.error` to see only new ones.

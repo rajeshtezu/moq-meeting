@@ -22,7 +22,7 @@ type Root = Catalog.Root;
 type Clock = { wall: number; timescale: number };
 
 /** Local staleness budgets: skip groups older than this rather than fall behind live. */
-const VIDEO_MAX_AGE = Time.Milli(500);
+const VIDEO_MAX_AGE = 500;
 const AUDIO_MAX_AGE = Time.Milli(300);
 
 function firstRendition<T>(section: unknown): [string, T] | undefined {
@@ -40,6 +40,7 @@ export class PeerMedia {
 	readonly #audioOut: AudioOut;
 	readonly #onStats: (s: PeerStats) => void;
 	readonly #abort = new AbortController();
+	readonly #videoMaxAge: Time.Milli;
 	#video: { key: string; stop: () => void } | undefined;
 	#audio: { key: string; stop: () => void } | undefined;
 	#clock: Clock | undefined;
@@ -55,7 +56,10 @@ export class PeerMedia {
 		canvas: HTMLCanvasElement,
 		audioOut: AudioOut,
 		onStats: (s: PeerStats) => void,
+		/** Screen shares send big keyframes at a low rate, so allow them more time. */
+		options: { videoMaxAgeMs?: number } = {},
 	) {
+		this.#videoMaxAge = Time.Milli(options.videoMaxAgeMs ?? VIDEO_MAX_AGE);
 		this.#canvas = canvas;
 		this.#audioOut = audioOut;
 		this.#onStats = onStats;
@@ -105,10 +109,10 @@ export class PeerMedia {
 	}
 
 	#runVideo(broadcast: Moq.Broadcast.Consumer, name: string, config: Catalog.VideoConfig): () => void {
-		const track = broadcast.track(name).subscribe({ priority: Catalog.PRIORITY.video, maxAge: VIDEO_MAX_AGE });
+		const track = broadcast.track(name).subscribe({ priority: Catalog.PRIORITY.video, maxAge: this.#videoMaxAge });
 		const consumer = new Container.Consumer(track, {
 			format: new Container.Legacy.Format(config),
-			maxAge: VIDEO_MAX_AGE,
+			maxAge: this.#videoMaxAge,
 		});
 		const ctx = this.#canvas.getContext("2d");
 		let stopped = false;

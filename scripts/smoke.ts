@@ -63,10 +63,12 @@ function waitForPresence(pred: (id: string, p: Presence) => boolean): Promise<vo
 	return new Promise((resolve) => presenceWaiters.push({ pred, resolve }));
 }
 
+const screenEvents: string[] = [];
 const bob = await RoomSession.join(overWebSocket(tokenB), {
 	...noop,
 	onPeerJoined: resolveJoin,
 	onChat: (from, message) => resolveMsg({ from, message }),
+	onScreen: (id, sharing) => screenEvents.push(`${id === tokenA.participantId ? "alice" : id}:${sharing}`),
 	onPresence: (id, p) => {
 		bobSees.set(id, p);
 		for (const w of presenceWaiters.splice(0))
@@ -103,6 +105,28 @@ await withTimeout(
 	"mic toggle within 1 s",
 );
 check(true, `presence update delivered in ${Math.round(performance.now() - toggledAt)} ms`);
+
+// Screen share: a second broadcast at <pid>/screen, allowed by the token's <pid>/** grant.
+// No browser media in Bun, so share a stream with no tracks: catalog only, which is enough
+// to exercise the announcement, the auth grant, and the retraction.
+alice.startScreenShare({ getVideoTracks: () => [] } as unknown as MediaStream);
+await withTimeout(
+	(async () => {
+		while (!screenEvents.includes("alice:true")) await Bun.sleep(20);
+	})(),
+	3000,
+	"bob sees alice's screen share",
+);
+check(true, "screen share broadcast is announced to peers");
+alice.stopScreenShare();
+await withTimeout(
+	(async () => {
+		while (!screenEvents.includes("alice:false")) await Bun.sleep(20);
+	})(),
+	3000,
+	"bob sees alice stop sharing",
+);
+check(screenEvents.join(",") === "alice:true,alice:false", "stopping the share retracts it");
 
 // 3. Leaving retracts the announcement, and a late joiner sees current presence.
 let resolveLeft: (id: string) => void = () => {};

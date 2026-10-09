@@ -13,7 +13,7 @@ import {
 import { AudioPublisher } from "../media/audio-publisher";
 import { CatalogPublisher } from "../media/catalog";
 import { MediaClock } from "../media/clock";
-import { VideoPublisher } from "../media/video-publisher";
+import { SCREEN, VideoPublisher } from "../media/video-publisher";
 
 /**
  * Thin adapter around `@moq/net` for one room session. Everything the app does with MoQ
@@ -22,6 +22,8 @@ import { VideoPublisher } from "../media/video-publisher";
  * Each participant publishes one broadcast at `<participantId>` holding `catalog.json`,
  * `video`, `audio`, `presence` (name + mic/cam state as a JSON snapshot), and `chat`
  * (a lossless JSON stream: one group for the whole session, so late joiners get history).
+ * A screen share is a second broadcast at `<participantId>/screen` (catalog + video), which
+ * the token's `<participantId>/**` grant covers; peers learn of it from its announcement.
  * Other participants are discovered from announcements; the UI subscribes to their media
  * through {@link RoomSession.peer}.
  */
@@ -31,6 +33,8 @@ export interface SessionEvents {
 	onPeerLeft(participantId: string): void;
 	/** A chat message from a peer (including history on join). `from` is their participant ID. */
 	onChat?(from: string, message: ChatMessage): void;
+	/** A peer started (`true`) or stopped (`false`) sharing their screen. */
+	onScreen?(participantId: string, sharing: boolean): void;
 	/** A peer's latest presence; late joiners get the current value immediately. */
 	onPresence?(participantId: string, presence: Presence): void;
 	onClosed(error?: Error): void;
@@ -64,6 +68,8 @@ export class RoomSession {
 	#presence: Presence;
 	readonly clock = new MediaClock();
 	#peers = new Map<string, Peer>();
+	#screens = new Map<string, Moq.Origin.Requesting>();
+	#myScreen: { broadcast: Moq.Broadcast.Producer; publishers: { close(): void }[] } | undefined;
 	#events: SessionEvents;
 	#closed = false;
 
@@ -147,6 +153,36 @@ export class RoomSession {
 		this.#presenceProducer?.update(this.#presence);
 	}
 
+	/** Publish `stream`'s video track as our screen share. Replaces any current share. */
+	startScreenShare(stream: MediaStream) {
+		this.stopScreenShare();
+		const broadcast = this.#origin.createBroadcast(Moq.Path.from(this.participantId, "screen"));
+		const catalog = new CatalogPublisher(broadcast, this.clock);
+		const publishers: { close(): void }[] = [catalog];
+		const [video] = stream.getVideoTracks();
+		if (video) publishers.push(new VideoPublisher(video, broadcast, this.clock, (r) => catalog.setVideo(r), SCREEN));
+		broadcast.announce();
+		this.#myScreen = { broadcast, publishers };
+	}
+
+	/** Stop sharing: closing the broadcast retracts its announcement, so peers drop the tile. */
+	stopScreenShare() {
+		const share = this.#myScreen;
+		if (!share) return;
+		this.#myScreen = undefined;
+		for (const p of share.publishers) p.close();
+		share.broadcast.close();
+	}
+
+	get sharingScreen(): boolean {
+		return this.#myScreen !== undefined;
+	}
+
+	/** The broadcast request for a peer's screen share, while they are sharing. */
+	screen(participantId: string): Moq.Origin.Requesting | undefined {
+		return this.#screens.get(participantId);
+	}
+
 	/** The broadcast request for a discovered participant, for subscribing to their media. */
 	peer(participantId: string): Moq.Origin.Requesting | undefined {
 		return this.#peers.get(participantId)?.request;
@@ -177,14 +213,32 @@ export class RoomSession {
 
 	async #watchAnnouncements() {
 		for await (const update of this.#origin.consume().announced()) {
-			const id = update.prefix as string;
-			if (id === this.participantId || id.includes("/")) continue;
+			const path = update.prefix as string;
+			const [id, kind, ...rest] = path.split("/");
+			if (!id || id === this.participantId || rest.length) continue;
+			if (kind === "screen") {
+				this.#onScreenAnnounce(id, path, Moq.Announce.isActive(update.kind));
+				continue;
+			}
+			if (kind !== undefined) continue;
 
 			if (Moq.Announce.isActive(update.kind)) {
 				if (!this.#peers.has(id)) this.#addPeer(id);
 			} else {
 				this.#removePeer(id);
 			}
+		}
+	}
+
+	#onScreenAnnounce(id: string, path: string, active: boolean) {
+		const existing = this.#screens.get(id);
+		if (active && !existing) {
+			this.#screens.set(id, this.#origin.request(Moq.Path.from(path), { announced: true }));
+			this.#events.onScreen?.(id, true);
+		} else if (!active && existing) {
+			this.#screens.delete(id);
+			existing.close();
+			this.#events.onScreen?.(id, false);
 		}
 	}
 
@@ -245,6 +299,9 @@ export class RoomSession {
 		if (this.#closed) return;
 		this.#closed = true;
 		for (const id of [...this.#peers.keys()]) this.#removePeer(id);
+		for (const r of this.#screens.values()) r.close();
+		this.#screens.clear();
+		this.stopScreenShare();
 		for (const p of this.#publishers) p.close();
 		this.#presenceProducer?.finish();
 		this.#presenceTrack?.close();

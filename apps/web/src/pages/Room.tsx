@@ -3,11 +3,12 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { joinRoom, savedName, saveName } from "../api";
 import { Card } from "../components/Card";
 import { type ChatEntry, ChatPanel } from "../components/ChatPanel";
-import { CamIcon, ChatIcon, MicIcon } from "../components/Icons";
+import { CamIcon, ChatIcon, MicIcon, ScreenIcon } from "../components/Icons";
 import { PeerTile } from "../components/PeerTile";
+import { LocalScreen, RemoteScreen } from "../components/ScreenTile";
 import { SelfTile } from "../components/SelfTile";
 import { AudioOut } from "../media/audio-out";
-import { captureLocal, type SourceKind } from "../media/capture";
+import { captureLocal, captureScreen, type SourceKind } from "../media/capture";
 import { RoomSession } from "../moq/session";
 
 type Status = { kind: "connecting" } | { kind: "connected"; transport: string } | { kind: "error"; message: string };
@@ -32,6 +33,13 @@ export function Room({ roomId }: { roomId: string }) {
 	const [presences, setPresences] = useState<Record<string, Presence>>({});
 	const [self, setSelf] = useState<Presence>();
 	const [chat, setChat] = useState<ChatEntry[]>([]);
+	/** Peers currently sharing, in the order they started. */
+	const [screens, setScreens] = useState<string[]>([]);
+	const [myScreen, setMyScreen] = useState<{ stream: MediaStream; stop: () => void }>();
+	const myScreenRef = useRef<{ stream: MediaStream; stop: () => void }>(undefined);
+	/** Which share is on the big stage: a peer ID, or "self". Defaults to the newest share. */
+	const [spotlight, setSpotlight] = useState<string>();
+	const [screenError, setScreenError] = useState<string>();
 	const [chatOpen, setChatOpen] = useState(false);
 	const [unread, setUnread] = useState(0);
 	const chatOpenRef = useRef(false);
@@ -59,11 +67,16 @@ export function Room({ roomId }: { roomId: string }) {
 					onPeerJoined: (id) => setPeers((p) => (p.includes(id) ? p : [...p, id])),
 					onPeerLeft: (id) => {
 						setPeers((p) => p.filter((x) => x !== id));
+						setScreens((list) => list.filter((x) => x !== id));
 						setPresences(({ [id]: _, ...rest }) => rest);
 					},
 					onPresence: (id, presence) => {
 						names.current[id] = presence.name;
 						setPresences((p) => ({ ...p, [id]: presence }));
+					},
+					onScreen: (id, sharing) => {
+						setScreens((list) => (sharing ? [...list.filter((x) => x !== id), id] : list.filter((x) => x !== id)));
+						if (sharing) setSpotlight(id);
 					},
 					onChat: (from, m) => {
 						addChat({ key: `${from}:${m.id}`, from, text: m.text, sentAt: m.sentAt, mine: false });
@@ -113,6 +126,32 @@ export function Room({ roomId }: { roomId: string }) {
 		}
 	}
 
+	function stopShare() {
+		const share = myScreenRef.current;
+		myScreenRef.current = undefined;
+		current.current?.session.stopScreenShare();
+		share?.stop();
+		setMyScreen(undefined);
+	}
+
+	async function toggleScreen() {
+		if (myScreenRef.current) return stopShare();
+		const s = current.current?.session;
+		if (!s) return;
+		setScreenError(undefined);
+		try {
+			// Stopping from the browser's own "Stop sharing" bar ends the track; treat it like our button.
+			const share = await captureScreen(source, s.name, stopShare);
+			myScreenRef.current = share;
+			s.startScreenShare(share.stream);
+			setMyScreen(share);
+			setSpotlight("self");
+		} catch (err) {
+			// Dismissing the picker is a NotAllowedError; not worth an error message.
+			if (!(err instanceof DOMException && err.name === "NotAllowedError")) setScreenError(String(err));
+		}
+	}
+
 	function toggleChat() {
 		const open = !chatOpenRef.current;
 		chatOpenRef.current = open;
@@ -135,6 +174,7 @@ export function Room({ roomId }: { roomId: string }) {
 	}
 
 	function leave() {
+		stopShare();
 		const j = current.current;
 		current.current = undefined;
 		j?.session.close();
@@ -184,6 +224,9 @@ export function Room({ roomId }: { roomId: string }) {
 	}
 
 	const count = peers.length + 1;
+	const shares = [...(myScreen ? ["self"] : []), ...screens];
+	const stage = spotlight && shares.includes(spotlight) ? spotlight : shares.at(-1);
+	const nameOf = (id: string) => (id === "self" ? "You" : (presences[id]?.name ?? names.current[id] ?? "Someone"));
 	const cols =
 		count <= 1
 			? "grid-cols-1"
@@ -222,17 +265,72 @@ export function Room({ roomId }: { roomId: string }) {
 			</header>
 
 			<div className="flex min-h-0 flex-1">
-				<main className={`grid flex-1 content-center gap-3 p-4 ${cols}`} data-testid="grid">
-					<SelfTile
-						presence={self}
-						stream={joined.stream}
-						context={joined.audioOut.context}
-						mirror={source === "camera"}
-					/>
-					{peers.map((id) => (
-						<PeerTile key={id} id={id} presence={presences[id]} session={joined.session} audioOut={joined.audioOut} />
-					))}
-				</main>
+				{stage ? (
+					// Spotlight: the share on the big stage, participants in a strip beside (or below) it.
+					<main className="flex min-h-0 flex-1 flex-col gap-3 p-4 lg:flex-row" data-testid="spotlight">
+						<section className="flex min-h-[50vh] flex-1 flex-col gap-2">
+							{shares.length > 1 && (
+								<div className="flex flex-wrap gap-2" data-testid="share-switcher">
+									{shares.map((id) => (
+										<button
+											key={id}
+											type="button"
+											className={id === stage ? "btn-primary" : "btn-ghost"}
+											onClick={() => setSpotlight(id)}
+										>
+											{nameOf(id)}
+										</button>
+									))}
+								</div>
+							)}
+							<div className="min-h-0 flex-1">
+								{stage === "self" && myScreen ? (
+									<LocalScreen stream={myScreen.stream} />
+								) : (
+									<RemoteScreen
+										key={stage}
+										id={stage}
+										name={nameOf(stage)}
+										session={joined.session}
+										audioOut={joined.audioOut}
+									/>
+								)}
+							</div>
+						</section>
+						<aside
+							className="flex shrink-0 gap-3 overflow-auto max-lg:[&>*]:w-56 max-lg:[&>*]:shrink-0 lg:w-64 lg:flex-col [&_[data-testid=stats]]:hidden"
+							data-testid="grid"
+						>
+							<SelfTile
+								presence={self}
+								stream={joined.stream}
+								context={joined.audioOut.context}
+								mirror={source === "camera"}
+							/>
+							{peers.map((id) => (
+								<PeerTile
+									key={id}
+									id={id}
+									presence={presences[id]}
+									session={joined.session}
+									audioOut={joined.audioOut}
+								/>
+							))}
+						</aside>
+					</main>
+				) : (
+					<main className={`grid flex-1 content-center gap-3 p-4 ${cols}`} data-testid="grid">
+						<SelfTile
+							presence={self}
+							stream={joined.stream}
+							context={joined.audioOut.context}
+							mirror={source === "camera"}
+						/>
+						{peers.map((id) => (
+							<PeerTile key={id} id={id} presence={presences[id]} session={joined.session} audioOut={joined.audioOut} />
+						))}
+					</main>
+				)}
 				{chatOpen && (
 					<ChatPanel
 						entries={chat}
@@ -284,10 +382,24 @@ export function Room({ roomId }: { roomId: string }) {
 						</span>
 					)}
 				</button>
+				<button
+					type="button"
+					data-testid="toggle-screen"
+					aria-pressed={!!myScreen}
+					className={myScreen ? "btn-primary" : "btn-ghost"}
+					onClick={toggleScreen}
+					title={screenError}
+				>
+					<ScreenIcon />
+					{myScreen ? "Stop sharing" : "Share screen"}
+				</button>
 				<button type="button" className="btn-danger" onClick={leave}>
 					Leave
 				</button>
 			</footer>
+			{screenError && (
+				<p className="bg-surface px-4 pb-3 text-center text-xs text-bad">Screen share failed: {screenError}</p>
+			)}
 		</div>
 	);
 }
