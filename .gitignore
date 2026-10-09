@@ -4,3 +4,6 @@ dist/
 .DS_Store
 # Signing keys are generated per environment (`bun run keys`); never commit them.
 infra/keys/*.jwk
+
+# Dev relay certificate (scripts/dev.ts regenerates it).
+infra/relay/dev-tls/

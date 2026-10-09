@@ -1,11 +1,14 @@
 /**
  * Local dev: start `moq auth serve`, `moq-relay`, and the Bun app server (with HMR)
- * together, and stop them all on Ctrl-C. Generates signing keys on first run.
+ * together, and stop them all on Ctrl-C. Generates signing keys and a dev TLS cert on
+ * first run. If the relay exits it is restarted (so you can kill it to test reconnects);
+ * if anything else exits, everything stops.
  */
 import { existsSync } from "node:fs";
 import { $, type Subprocess } from "bun";
 
 const KEYS = { private: "infra/keys/private.jwk", public: "infra/keys/public.jwk" };
+const TLS = { dir: "infra/relay/dev-tls", cert: "infra/relay/dev-tls/cert.pem", key: "infra/relay/dev-tls/key.pem" };
 
 for (const bin of ["moq", "moq-relay"]) {
 	if (!Bun.which(bin)) {
@@ -21,13 +24,26 @@ if (!existsSync(KEYS.private)) {
 	await $`moq auth generate --algorithm ES256 --out ${KEYS.private} --public ${KEYS.public}`;
 }
 
-const procs: Subprocess[] = [];
-function start(name: string, cmd: string[], env: Record<string, string> = {}) {
+// Regenerate the dev cert when missing or within a day of expiry (`-checkend` exits non-zero).
+const certValid = existsSync(TLS.cert) && (await $`openssl x509 -checkend 86400 -noout -in ${TLS.cert}`.nothrow().quiet()).exitCode === 0;
+if (!certValid) {
+	console.log("generating a 10-day dev TLS certificate in infra/relay/dev-tls/");
+	await $`mkdir -p ${TLS.dir}`;
+	await $`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ${TLS.key} -out ${TLS.cert} -days 10 -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1`.quiet();
+}
+
+const procs = new Set<Subprocess>();
+function start(name: string, cmd: string[], env: Record<string, string> = {}, restart = false) {
 	const proc = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit", env: { ...process.env, ...env } });
-	procs.push(proc);
+	procs.add(proc);
 	proc.exited.then((code) => {
+		procs.delete(proc);
+		if (stopping) return;
 		console.error(`[${name}] exited with ${code}`);
-		shutdown(code ?? 1);
+		if (restart) {
+			console.error(`[${name}] restarting in 1 s`);
+			setTimeout(() => !stopping && start(name, cmd, env, restart), 1000);
+		} else shutdown(code ?? 1);
 	});
 }
 
@@ -42,7 +58,7 @@ process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
 start("auth", ["moq", "auth", "serve", "--key", KEYS.public]);
-start("relay", ["moq-relay", "infra/relay/relay.dev.toml"], { RUST_LOG: process.env.RUST_LOG ?? "info" });
+start("relay", ["moq-relay", "infra/relay/relay.dev.toml"], { RUST_LOG: process.env.RUST_LOG ?? "info" }, true);
 
 // Wait for the relay's HTTP listener so the first token request can fetch its fingerprint.
 for (let i = 0; i < 50; i++) {

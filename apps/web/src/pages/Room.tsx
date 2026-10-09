@@ -11,7 +11,11 @@ import { AudioOut } from "../media/audio-out";
 import { captureLocal, captureScreen, type SourceKind } from "../media/capture";
 import { RoomSession } from "../moq/session";
 
-type Status = { kind: "connecting" } | { kind: "connected"; transport: string } | { kind: "error"; message: string };
+type Status =
+	| { kind: "connecting" }
+	| { kind: "connected"; transport: string }
+	| { kind: "reconnecting" }
+	| { kind: "error"; message: string };
 
 interface Joined {
 	session: RoomSession;
@@ -74,6 +78,12 @@ export function Room({ roomId }: { roomId: string }) {
 						names.current[id] = presence.name;
 						setPresences((p) => ({ ...p, [id]: presence }));
 					},
+					onStatus: (st) =>
+						setStatus(
+							st === "connected"
+								? { kind: "connected", transport: current.current?.session.transport ?? "unknown" }
+								: { kind: "reconnecting" },
+						),
 					onScreen: (id, sharing) => {
 						setScreens((list) => (sharing ? [...list.filter((x) => x !== id), id] : list.filter((x) => x !== id)));
 						if (sharing) setSpotlight(id);
@@ -242,13 +252,15 @@ export function Room({ roomId }: { roomId: string }) {
 				<h1 className="font-semibold">Room {roomId}</h1>
 				<span
 					data-testid="status"
-					className={`rounded-full px-2.5 py-0.5 text-xs ${status.kind === "connected" ? "bg-ok/15 text-ok" : status.kind === "error" ? "bg-bad/15 text-bad" : "text-muted"}`}
+					className={`rounded-full px-2.5 py-0.5 text-xs ${status.kind === "connected" ? "bg-ok/15 text-ok" : status.kind === "error" ? "bg-bad/15 text-bad" : status.kind === "reconnecting" ? "bg-yellow-500/15 text-yellow-400" : "text-muted"}`}
 				>
 					{status.kind === "connected"
 						? `connected (${status.transport})`
 						: status.kind === "error"
 							? status.message
-							: "connecting"}
+							: status.kind === "reconnecting"
+								? "reconnecting…"
+								: "connecting"}
 				</span>
 				<span className="text-xs text-muted">
 					{count} participant{count === 1 ? "" : "s"}

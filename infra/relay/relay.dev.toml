@@ -1,9 +1,16 @@
 # Local development relay. Run via `bun run dev` (see scripts/dev.ts).
+
+# A persistent self-signed cert (made by scripts/dev.ts, valid 10 days: WebTransport only
+# pins certificates valid for at most 14). Unlike `tls.generate`, it survives relay restarts,
+# so clients pinned to its fingerprint can reconnect.
 [listen]
 bind = "[::]:4443"
-tls.generate = ["localhost"]
 
-# Serves /certificate.sha256 (self-signed fingerprint) and the WebSocket fallback.
+[listen.tls]
+cert = "infra/relay/dev-tls/cert.pem"
+key = "infra/relay/dev-tls/key.pem"
+
+# Serves /certificate.sha256 (the fingerprint) and the WebSocket fallback.
 [web.http]
 listen = "[::]:4443"
 

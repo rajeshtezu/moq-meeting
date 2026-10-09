@@ -35,10 +35,14 @@ export interface SessionEvents {
 	onChat?(from: string, message: ChatMessage): void;
 	/** A peer started (`true`) or stopped (`false`) sharing their screen. */
 	onScreen?(participantId: string, sharing: boolean): void;
+	/** Connection state changes after joining; the session reconnects on its own. */
+	onStatus?(status: ConnectionStatus): void;
 	/** A peer's latest presence; late joiners get the current value immediately. */
 	onPresence?(participantId: string, presence: Presence): void;
 	onClosed(error?: Error): void;
 }
+
+export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
 /** Below audio/video: chat can wait a few ms under congestion; the log itself is lossless. */
 const CHAT_PRIORITY = 40;
@@ -54,7 +58,8 @@ export class RoomSession {
 	readonly name: string;
 
 	#origin = new Moq.Origin.Producer();
-	#connection: Moq.Connection.Established | undefined;
+	#connection: Moq.Connection | undefined;
+	readonly #effect = new Moq.Signals.Effect();
 	#broadcast: Moq.Broadcast.Producer | undefined;
 	#chatTrack: Moq.Track.Producer | undefined;
 	#chat: Json.Stream.Producer<ChatMessage> | undefined;
@@ -89,7 +94,10 @@ export class RoomSession {
 
 	async #connect(token: TokenResponse, media?: MediaStream) {
 		const origin = this.#origin;
-		this.#connection = await Moq.Connection.connect({
+		// A reconnecting handle: on a network blip or relay restart it redials with backoff,
+		// and because the origin is ours, our broadcasts are re-announced on each new session.
+		// Peers' broadcasts retract while we're disconnected and reappear after.
+		const connection = new Moq.Connection({
 			url: new URL(token.relayUrl),
 			// One origin for both directions: our broadcast is announced to the relay, and
 			// everything the relay announces in this room lands in the same table.
@@ -98,6 +106,31 @@ export class RoomSession {
 			webtransport: token.certificateHash
 				? { serverCertificateHashes: [{ algorithm: "sha-256", value: token.certificateHash }] }
 				: undefined,
+		});
+		this.#connection = connection;
+
+		// Resolve on the first connect; reject on a fatal error (e.g. auth refused, which
+		// stops the reconnect loop). Afterwards, report status changes and close on fatal errors.
+		await new Promise<void>((resolve, reject) => {
+			let joined = false;
+			this.#effect.run((effect) => {
+				const status = effect.get(connection.status);
+				if (status === "connected" && !joined) {
+					joined = true;
+					resolve();
+				}
+				if (joined) this.#events.onStatus?.(status);
+			});
+			this.#effect.run((effect) => {
+				const err = effect.get(connection.error);
+				if (!err) return;
+				if (joined) this.close(err);
+				else reject(err);
+			});
+		}).catch((err) => {
+			this.#effect.close();
+			connection.close();
+			throw err;
 		});
 
 		const broadcast = origin.createBroadcast(Moq.Path.from(this.participantId));
@@ -113,7 +146,6 @@ export class RoomSession {
 		this.#broadcast = broadcast;
 
 		void this.#watchAnnouncements();
-		void this.#connection.closed.then((err) => this.close(err ?? undefined));
 	}
 
 	#publishMedia(broadcast: Moq.Broadcast.Producer, media: MediaStream) {
@@ -190,7 +222,7 @@ export class RoomSession {
 
 	/** Transport actually in use; WebSocket means we fell back from WebTransport. */
 	get transport(): string {
-		return this.#connection?.transport ?? "unknown";
+		return this.#connection?.transport.peek() ?? "unknown";
 	}
 
 	/**
@@ -308,6 +340,7 @@ export class RoomSession {
 		this.#chat?.finish();
 		this.#chatTrack?.close();
 		this.#broadcast?.close();
+		this.#effect.close();
 		this.#connection?.close();
 		this.#origin.close();
 		this.#events.onClosed(error);
