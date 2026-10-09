@@ -13,7 +13,7 @@ import {
 import { AudioPublisher } from "../media/audio-publisher";
 import { CatalogPublisher } from "../media/catalog";
 import { MediaClock } from "../media/clock";
-import { SCREEN, VideoPublisher } from "../media/video-publisher";
+import { type NetworkSignals, SCREEN, VideoPublisher } from "../media/video-publisher";
 
 /**
  * Thin adapter around `@moq/net` for one room session. Everything the app does with MoQ
@@ -154,7 +154,14 @@ export class RoomSession {
 		this.#publishers.push(catalog);
 		const [video] = media.getVideoTracks();
 		if (video) {
-			this.#video = new VideoPublisher(video, broadcast, this.clock, (r) => catalog.setVideo(r));
+			this.#video = new VideoPublisher(
+				video,
+				broadcast,
+				this.clock,
+				(r) => catalog.setVideo(r),
+				undefined,
+				() => this.#network(),
+			);
 			this.#publishers.push(this.#video);
 		}
 		const [audio] = media.getAudioTracks();
@@ -192,7 +199,17 @@ export class RoomSession {
 		const catalog = new CatalogPublisher(broadcast, this.clock);
 		const publishers: { close(): void }[] = [catalog];
 		const [video] = stream.getVideoTracks();
-		if (video) publishers.push(new VideoPublisher(video, broadcast, this.clock, (r) => catalog.setVideo(r), SCREEN));
+		if (video)
+			publishers.push(
+				new VideoPublisher(
+					video,
+					broadcast,
+					this.clock,
+					(r) => catalog.setVideo(r),
+					SCREEN,
+					() => this.#network(),
+				),
+			);
 		broadcast.announce();
 		this.#myScreen = { broadcast, publishers };
 	}
@@ -204,6 +221,22 @@ export class RoomSession {
 		this.#myScreen = undefined;
 		for (const p of share.publishers) p.close();
 		share.broadcast.close();
+	}
+
+	#network(): NetworkSignals {
+		const c = this.#connection;
+		return { bandwidth: c?.bandwidth.peek(), rtt: c?.probe.peek()?.rtt };
+	}
+
+	/** Transport-level estimates for debugging and ABR: PROBE (relay's view) and send counters. */
+	async netStats(): Promise<{ probe: unknown; stats: unknown; bandwidth: boolean }> {
+		const c = this.#connection;
+		return { probe: c?.probe.peek(), stats: await c?.stats(), bandwidth: !!c?.bandwidth.peek() };
+	}
+
+	/** Camera encoder's current target bitrate and its bandwidth grant (bits/s), for the self tile. */
+	get sendStats(): { bitrate: number; grant: number | undefined; rtt: number | undefined } | undefined {
+		return this.#video ? { ...this.#video.send } : undefined;
 	}
 
 	get sharingScreen(): boolean {

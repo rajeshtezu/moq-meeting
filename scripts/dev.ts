@@ -25,7 +25,9 @@ if (!existsSync(KEYS.private)) {
 }
 
 // Regenerate the dev cert when missing or within a day of expiry (`-checkend` exits non-zero).
-const certValid = existsSync(TLS.cert) && (await $`openssl x509 -checkend 86400 -noout -in ${TLS.cert}`.nothrow().quiet()).exitCode === 0;
+const certValid =
+	existsSync(TLS.cert) &&
+	(await $`openssl x509 -checkend 86400 -noout -in ${TLS.cert}`.nothrow().quiet()).exitCode === 0;
 if (!certValid) {
 	console.log("generating a 10-day dev TLS certificate in infra/relay/dev-tls/");
 	await $`mkdir -p ${TLS.dir}`;

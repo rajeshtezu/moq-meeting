@@ -63,8 +63,17 @@ export function Room({ roomId }: { roomId: string }) {
 		const audioOut = new AudioOut();
 		let media: { stream: MediaStream; stop: () => void } | undefined;
 		try {
-			media = await captureLocal(source, name.trim());
+			media = await captureLocal(source, name.trim(), {
+				heavy: new URLSearchParams(window.location.search).get("heavy") === "1",
+			});
 			const token = await joinRoom(roomId, name.trim());
+			// Dev/testing: `?relayPort=4444` routes this tab via scripts/netem.ts (the token is the same).
+			const relayPort = new URLSearchParams(window.location.search).get("relayPort");
+			if (relayPort && /^\d+$/.test(relayPort)) {
+				const url = new URL(token.relayUrl);
+				url.port = relayPort;
+				token.relayUrl = url.toString();
+			}
 			const session = await RoomSession.join(
 				token,
 				{
@@ -98,6 +107,9 @@ export function Room({ roomId }: { roomId: string }) {
 			);
 			const j = { session, audioOut, stream: media.stream, stopMedia: media.stop };
 			current.current = j;
+			// `?debug=1`: expose the session for console inspection (dev aid).
+			if (new URLSearchParams(window.location.search).get("debug") === "1")
+				(window as unknown as { moq: RoomSession }).moq = session;
 			setJoined(j);
 			setSelf(session.presence);
 			setStatus({ kind: "connected", transport: session.transport });
@@ -318,6 +330,7 @@ export function Room({ roomId }: { roomId: string }) {
 								stream={joined.stream}
 								context={joined.audioOut.context}
 								mirror={source === "camera"}
+								sendStats={() => joined.session.sendStats}
 							/>
 							{peers.map((id) => (
 								<PeerTile
@@ -337,6 +350,7 @@ export function Room({ roomId }: { roomId: string }) {
 							stream={joined.stream}
 							context={joined.audioOut.context}
 							mirror={source === "camera"}
+							sendStats={() => joined.session.sendStats}
 						/>
 						{peers.map((id) => (
 							<PeerTile key={id} id={id} presence={presences[id]} session={joined.session} audioOut={joined.audioOut} />

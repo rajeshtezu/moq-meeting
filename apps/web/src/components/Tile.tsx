@@ -9,6 +9,8 @@ interface TileProps {
 	micOff?: boolean;
 	/** Covers the video with an avatar (camera off, or no video yet). */
 	camOff?: boolean;
+	/** Shown under the avatar, e.g. why video is paused. */
+	notice?: string;
 	testId?: string;
 	children: ReactNode;
 }
@@ -25,7 +27,7 @@ function initials(name: string): string {
 }
 
 /** A 16:9 participant tile: video, name label, mic state, speaking ring, optional stats. */
-export function Tile({ label, badge, stats, speaking, micOff, camOff, testId, children }: TileProps) {
+export function Tile({ label, badge, stats, speaking, micOff, camOff, notice, testId, children }: TileProps) {
 	return (
 		<div
 			data-testid={testId}
@@ -36,10 +38,15 @@ export function Tile({ label, badge, stats, speaking, micOff, camOff, testId, ch
 		>
 			{children}
 			{camOff && (
-				<div className="absolute inset-0 grid place-items-center bg-surface">
+				<div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface">
 					<div className="grid size-20 place-items-center rounded-full bg-surface-2 text-2xl font-semibold text-muted">
 						{initials(label)}
 					</div>
+					{notice && (
+						<p className="text-xs text-yellow-400" data-testid="notice">
+							{notice}
+						</p>
+					)}
 				</div>
 			)}
 			<div className="absolute bottom-2 left-2 flex items-center gap-2 rounded-md bg-black/60 px-2 py-1 text-xs">
@@ -53,9 +60,9 @@ export function Tile({ label, badge, stats, speaking, micOff, camOff, testId, ch
 				</span>
 				{badge && <span className="text-muted">{badge}</span>}
 			</div>
-			{stats && !camOff && (
+			{stats && (!camOff || notice) && (
 				<div
-					className="absolute top-2 right-2 rounded-md bg-black/60 px-2 py-1 font-mono text-[11px] text-muted"
+					className="absolute top-2 right-2 rounded-md bg-black/60 px-2 py-1 text-right font-mono text-[11px] whitespace-pre text-muted"
 					data-testid="stats"
 				>
 					{stats}

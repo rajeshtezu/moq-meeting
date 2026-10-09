@@ -4,6 +4,15 @@ import { Time } from "@moq/net";
 import { Tracks } from "@moq-meeting/shared";
 import { toHex, type VideoRendition } from "./catalog";
 import { type MediaClock, Rebase } from "./clock";
+import { RateController } from "./rate";
+
+/** What the connection can tell a sender about its uplink. */
+export interface NetworkSignals {
+	/** The connection's send-side bandwidth allocator. */
+	bandwidth?: Moq.Bandwidth.Handle;
+	/** Relay-measured round trip, ms (PROBE). */
+	rtt?: number;
+}
 
 export interface VideoProfile {
 	/** Capture constraints; the encoder is sized from the actual frames. */
@@ -11,6 +20,8 @@ export interface VideoProfile {
 	height: number;
 	framerate: number;
 	bitrate: number;
+	/** Adaptive bitrate floor: below this, the relay dropping groups beats a mushy picture. */
+	minBitrate: number;
 	/** A keyframe (and so a new group) this often bounds join time and loss recovery. */
 	keyframeIntervalUs: number;
 	/** Tried in order; the first the browser can encode wins. */
@@ -24,6 +35,7 @@ export const CAMERA: VideoProfile = {
 	height: 360,
 	framerate: 30,
 	bitrate: 800_000,
+	minBitrate: 150_000,
 	keyframeIntervalUs: 2_000_000,
 	codecs: [{ codec: "avc1.42E01F", avc: { format: "annexb" } }, { codec: "vp8" }],
 	contentHint: "motion",
@@ -38,6 +50,7 @@ export const SCREEN: VideoProfile = {
 	height: 1080,
 	framerate: 15,
 	bitrate: 2_000_000,
+	minBitrate: 300_000,
 	keyframeIntervalUs: 3_000_000,
 	codecs: [{ codec: "avc1.42E028", avc: { format: "annexb" } }, { codec: "vp8" }],
 	contentHint: "detail",
@@ -75,7 +88,16 @@ export class VideoPublisher {
 	readonly #profile: VideoProfile;
 	#reader: ReadableStreamDefaultReader<VideoFrame> | undefined;
 	#encoder: VideoEncoder | undefined;
+	#config: VideoEncoderConfig | undefined;
+	readonly #track: Moq.Track.Producer;
+	readonly #network: (() => NetworkSignals) | undefined;
+	readonly #rate: RateController;
+	#reservation: { handle: Moq.Bandwidth.Handle; reservation: Moq.Bandwidth.Reservation } | undefined;
+	readonly #abrTimer: ReturnType<typeof setInterval>;
+	/** The encoder's current target and the allocator's latest grant, for the local stats overlay. */
+	readonly send = { bitrate: 0, grant: undefined as number | undefined, rtt: undefined as number | undefined };
 	#enabled = true;
+	#frameCount = 0;
 	#forceKeyframe = false;
 	#closed = false;
 
@@ -85,13 +107,23 @@ export class VideoPublisher {
 		clock: MediaClock,
 		onRendition: (r: VideoRendition) => void,
 		profile: VideoProfile = CAMERA,
+		/**
+		 * Uplink signals. When given, the encoder bitrate adapts between minBitrate and bitrate
+		 * (see RateController), so a slow uplink gets a lighter stream instead of the relay
+		 * dropping whole groups.
+		 */
+		network?: () => NetworkSignals,
 	) {
+		this.#network = network;
+		this.#rate = new RateController({ min: profile.minBitrate, max: profile.bitrate });
 		this.#source = source;
 		this.#profile = profile;
 		if (profile.contentHint) source.contentHint = profile.contentHint;
 		this.#rebase = new Rebase(clock);
 		this.#onRendition = onRendition;
 		const track = broadcast.createTrack(Tracks.video, Container.trackInfo({ priority: Catalog.PRIORITY.video }));
+		this.#track = track;
+		this.#abrTimer = setInterval(() => this.#adapt(), 1000);
 		this.#producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 		void this.#run().catch((err) => {
 			if (!this.#closed) console.error("video publisher failed", err);
@@ -123,12 +155,23 @@ export class VideoPublisher {
 					await this.#encoder.flush().catch(() => {});
 					this.#encoder.close();
 				}
-				this.#encoder = this.#createEncoder(await pickCodec(this.#profile, width, height));
+				this.#config = { ...(await pickCodec(this.#profile, width, height)), bitrate: this.#rate.target };
+				this.#encoder = this.#createEncoder(this.#config);
+				this.send.bitrate = this.#config.bitrate ?? this.#profile.bitrate;
 				this.#forceKeyframe = true;
 			}
 
 			// Camera off: the track is disabled and yields black frames; send nothing.
 			if (!this.#enabled) {
+				frame.close();
+				continue;
+			}
+
+			// At low bitrates send fewer frames, so each gets enough bits (and the encoder
+			// overshoots less): 15 fps under 300 kbps, 10 fps under 200 kbps.
+			const keep =
+				this.send.bitrate && this.send.bitrate < 200_000 ? 3 : this.send.bitrate && this.send.bitrate < 300_000 ? 2 : 1;
+			if (keep > 1 && ++this.#frameCount % keep !== 0 && !this.#forceKeyframe) {
 				frame.close();
 				continue;
 			}
@@ -171,6 +214,30 @@ export class VideoPublisher {
 		return encoder;
 	}
 
+	/** Once a second: adapt the encoder bitrate to the uplink. */
+	#adapt() {
+		const encoder = this.#encoder;
+		const config = this.#config;
+		if (!this.#network || !encoder || encoder.state !== "configured" || !config) return;
+		const { bandwidth, rtt } = this.#network();
+		if (bandwidth && this.#reservation?.handle !== bandwidth) {
+			// New connection (or first time): reserve our ceiling on its allocator.
+			this.#reservation?.reservation.close();
+			this.#reservation = { handle: bandwidth, reservation: bandwidth.reserve(this.#track, this.#profile.bitrate) };
+		}
+		// undefined = no estimate or nobody subscribed; the controller falls back to RTT.
+		const grant = this.#reservation?.reservation.peek();
+		this.send.grant = grant;
+		this.send.rtt = rtt;
+		const target = this.#rate.update({ grant, rtt });
+		const current = config.bitrate ?? this.#profile.bitrate;
+		// Hysteresis: only reconfigure on a >10% change.
+		if (Math.abs(target - current) / current < 0.1) return;
+		this.#config = { ...config, bitrate: target };
+		encoder.configure(this.#config);
+		this.send.bitrate = target;
+	}
+
 	/**
 	 * Camera on/off. Off disables the capture track (Chrome turns the camera light off),
 	 * flushes the encoder and cuts the group, so subscribers see a clean break instead of
@@ -194,6 +261,8 @@ export class VideoPublisher {
 	close() {
 		if (this.#closed) return;
 		this.#closed = true;
+		clearInterval(this.#abrTimer);
+		this.#reservation?.reservation.close();
 		void this.#reader?.cancel().catch(() => {});
 		if (this.#encoder?.state === "configured") this.#encoder.close();
 		this.#producer.close();

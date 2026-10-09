@@ -16,6 +16,19 @@ export interface PeerStats {
 	audio: boolean;
 	/** Peak RMS of decoded audio over the last second, in dBFS; undefined if none arrived. */
 	audioLevelDb?: number;
+	/** Video payload received over the last second. */
+	videoKbps: number;
+	/** Video groups skipped (too late or lost) since subscribing: the relay/consumer shedding load. */
+	videoSkips: number;
+	/** Capture → decode for audio, using the peer's catalog clock. */
+	audioLatencyMs?: number;
+	/** Jitter buffer counters since subscribing. */
+	audioUnderruns: number;
+	audioDroppedMs: number;
+	/** The adaptive jitter buffer's current playout delay. */
+	audioBufferMs: number;
+	/** Video paused because it fell too far behind live (audio-only fallback). */
+	videoPaused: boolean;
 }
 
 type Root = Catalog.Root;
@@ -23,6 +36,18 @@ type Clock = { wall: number; timescale: number };
 
 /** Local staleness budgets: skip groups older than this rather than fall behind live. */
 const VIDEO_MAX_AGE = 500;
+
+/**
+ * Audio-only fallback. Skipping happens per group, so a starved video stream can sit up to a
+ * GoP behind live. If it stays more than LAG_MS behind for LAG_SECONDS, drop the video
+ * subscription (freeing the bandwidth for audio) and retry later, backing off each time.
+ */
+const LAG_MS = 1000;
+/** Long enough for the sender's rate controller (1 s ticks) to react first. */
+const LAG_SECONDS = 5;
+const RETRY_MS = { first: 15_000, max: 60_000 };
+/** A resumed stream that stays healthy this long resets the backoff. */
+const HEALTHY_RESET_MS = 30_000;
 const AUDIO_MAX_AGE = Time.Milli(300);
 
 function firstRendition<T>(section: unknown): [string, T] | undefined {
@@ -49,7 +74,26 @@ export class PeerMedia {
 	#audioPeak = 0;
 	readonly #speaking = new SpeakingDetector();
 	#statsTimer: ReturnType<typeof setInterval>;
-	#stats: PeerStats = { fps: 0, audio: false };
+	#stats: PeerStats = {
+		fps: 0,
+		audio: false,
+		videoKbps: 0,
+		videoSkips: 0,
+		audioUnderruns: 0,
+		audioDroppedMs: 0,
+		audioBufferMs: 0,
+		videoPaused: false,
+	};
+	/** The video rendition we want, and whether its pipeline is running or paused. */
+	#videoWant: { broadcast: Moq.Broadcast.Consumer; name: string; config: Catalog.VideoConfig } | undefined;
+	#lagSeconds = 0;
+	#pausedUntil = 0;
+	#retryMs = RETRY_MS.first;
+	#resumedAt = 0;
+	#videoBytes = 0;
+	#videoSkips = 0;
+	#audioLatency: number | undefined;
+	#peerAudio: PeerAudio | undefined;
 
 	constructor(
 		request: Moq.Origin.Requesting,
@@ -65,8 +109,22 @@ export class PeerMedia {
 		this.#onStats = onStats;
 		this.#statsTimer = setInterval(() => {
 			const audioLevelDb = this.#audioPeak > 0 ? Math.round(20 * Math.log10(this.#audioPeak)) : undefined;
-			this.#stats = { ...this.#stats, fps: this.#frames, videoLatencyMs: this.#latency, audioLevelDb };
+			const playout = this.#peerAudio?.stats();
+			this.#checkLag(Math.round((this.#videoBytes * 8) / 1000));
+			this.#stats = {
+				...this.#stats,
+				fps: this.#frames,
+				videoLatencyMs: this.#video ? this.#latency : undefined,
+				audioLevelDb,
+				videoKbps: Math.round((this.#videoBytes * 8) / 1000),
+				videoSkips: this.#videoSkips,
+				audioLatencyMs: this.#audioLatency,
+				audioUnderruns: playout?.underruns ?? 0,
+				audioDroppedMs: playout?.droppedMs ?? 0,
+				audioBufferMs: playout?.startMs ?? 0,
+			};
 			this.#frames = 0;
+			this.#videoBytes = 0;
 			this.#audioPeak = 0;
 			this.#onStats(this.#stats);
 		}, 1000);
@@ -93,10 +151,13 @@ export class PeerMedia {
 
 		const video = firstRendition<Catalog.VideoConfig>(root.video);
 		const videoKey = video ? JSON.stringify(video) : "";
-		if (videoKey !== (this.#video?.key ?? "")) {
-			this.#video?.stop();
-			this.#video = video ? { key: videoKey, stop: this.#runVideo(broadcast, video[0], video[1]) } : undefined;
+		if (videoKey !== (this.#videoKey ?? "")) {
+			this.#videoKey = videoKey;
+			this.#videoWant = video ? { broadcast, name: video[0], config: video[1] } : undefined;
 			this.#stats = { ...this.#stats, codec: video?.[1].codec };
+			this.#video?.stop();
+			this.#video = undefined;
+			if (!this.#stats.videoPaused) this.#startVideo();
 		}
 
 		const audio = firstRendition<Catalog.AudioConfig>(root.audio);
@@ -105,6 +166,45 @@ export class PeerMedia {
 			this.#audio?.stop();
 			this.#audio = audio ? { key: audioKey, stop: this.#runAudio(broadcast, audio[0], audio[1]) } : undefined;
 			this.#stats = { ...this.#stats, audio: !!audio };
+		}
+	}
+
+	#videoKey: string | undefined;
+
+	#startVideo() {
+		const want = this.#videoWant;
+		if (!want) return;
+		this.#latency = undefined;
+		this.#video = { key: this.#videoKey ?? "", stop: this.#runVideo(want.broadcast, want.name, want.config) };
+	}
+
+	/** Called once a second: pause video that's persistently behind, resume it when the retry is due. */
+	#checkLag(kbps: number) {
+		const now = performance.now();
+		if (this.#stats.videoPaused) {
+			if (now >= this.#pausedUntil) {
+				this.#stats = { ...this.#stats, videoPaused: false };
+				this.#lagSeconds = 0;
+				this.#resumedAt = now;
+				this.#startVideo();
+			}
+			return;
+		}
+		if (!this.#video) return;
+		// Behind: frames render late, or bytes arrive but nothing renders (waiting on a stalled GoP).
+		const behind = (this.#latency !== undefined && this.#latency > LAG_MS) || (this.#frames === 0 && kbps > 0);
+		this.#lagSeconds = behind ? this.#lagSeconds + 1 : 0;
+		if (!behind && this.#resumedAt && now - this.#resumedAt > HEALTHY_RESET_MS) {
+			this.#retryMs = RETRY_MS.first;
+			this.#resumedAt = 0;
+		}
+		if (this.#lagSeconds >= LAG_SECONDS) {
+			this.#video.stop();
+			this.#video = undefined;
+			this.#latency = undefined;
+			this.#pausedUntil = now + this.#retryMs;
+			this.#retryMs = Math.min(this.#retryMs * 2, RETRY_MS.max);
+			this.#stats = { ...this.#stats, videoPaused: true };
 		}
 	}
 
@@ -117,6 +217,7 @@ export class PeerMedia {
 		const ctx = this.#canvas.getContext("2d");
 		let stopped = false;
 		let needKeyframe = true;
+		let started = false;
 
 		const makeDecoder = (): VideoDecoder => {
 			const d = new VideoDecoder({
@@ -153,8 +254,13 @@ export class PeerMedia {
 				if (!next || stopped) break;
 				const { frame } = next;
 				if (!frame) continue;
+				this.#videoBytes += frame.payload.byteLength;
 				// After a skipped group or a decoder reset, resume only at a keyframe.
-				if (!next.continuous) needKeyframe = true;
+				if (!next.continuous) {
+					if (started) this.#videoSkips++;
+					needKeyframe = true;
+				}
+				started = true;
 				if (needKeyframe && !frame.keyframe) continue;
 				needKeyframe = false;
 				if (decoder.state !== "configured") continue;
@@ -206,10 +312,14 @@ export class PeerMedia {
 
 		void (async () => {
 			out = await this.#audioOut.addPeer();
+			this.#peerAudio = out;
 			for (;;) {
 				const next = await consumer.next();
 				if (!next || stopped) break;
 				if (!next.frame || decoder.state !== "configured") continue;
+				// Measure on arrival: AudioDecoder output timestamps are derived from the first
+				// chunk plus samples decoded, so after a skip they run ahead of the real ones.
+				if (this.#clock) this.#audioLatency = Math.round(Date.now() - wallTimeMs(this.#clock, next.frame.timestamp));
 				decoder.decode(
 					new EncodedAudioChunk({ type: "key", timestamp: next.frame.timestamp, data: next.frame.payload }),
 				);

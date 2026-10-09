@@ -7,13 +7,15 @@ import { Tile } from "./Tile";
 
 function formatStats(s: PeerStats | undefined): string | undefined {
 	if (!s) return undefined;
-	const parts = [`${s.fps} fps`];
-	if (s.videoLatencyMs !== undefined) parts.push(`${s.videoLatencyMs} ms`);
-	if (s.height) parts.push(`${s.height}p`);
-	if (s.codec) parts.push(s.codec.split(".")[0] ?? s.codec);
-	if (!s.audio) parts.push("no audio");
-	else parts.push(s.audioLevelDb === undefined ? "♪ –" : `♪ ${s.audioLevelDb} dB`);
-	return parts.join(" · ");
+	const video = [`${s.fps} fps`, s.height ? `${s.height}p` : undefined, s.codec?.split(".")[0], `${s.videoKbps} kbps`];
+	const net = [
+		s.videoLatencyMs !== undefined ? `v ${s.videoLatencyMs} ms` : undefined,
+		s.audioLatencyMs !== undefined ? `a ${s.audioLatencyMs} ms` : undefined,
+		s.videoPaused ? "video paused" : `skip ${s.videoSkips}`,
+		s.audio ? `gap ${s.audioUnderruns} · jb ${s.audioBufferMs}` : "no audio",
+		s.audioLevelDb !== undefined ? `♪ ${s.audioLevelDb} dB` : undefined,
+	];
+	return [video, net].map((l) => l.filter(Boolean).join(" · ")).join("\n");
 }
 
 interface Props {
@@ -42,6 +44,7 @@ export function PeerTile({ id, presence, session, audioOut }: Props) {
 	// Until presence arrives, show the tile with a neutral label rather than the raw ID.
 	const name = presence?.name ?? "Joining…";
 	const camOff = presence ? !presence.cam : !stats?.fps;
+	const notice = stats?.videoPaused && !camOff ? "Video paused: weak connection" : undefined;
 
 	return (
 		<Tile
@@ -50,7 +53,8 @@ export function PeerTile({ id, presence, session, audioOut }: Props) {
 			stats={formatStats(stats)}
 			speaking={speaking && presence?.mic !== false}
 			micOff={presence?.mic === false}
-			camOff={camOff}
+			camOff={camOff || !!notice}
+			notice={notice}
 		>
 			<canvas ref={canvas} className="h-full w-full object-contain" data-peer={id} />
 		</Tile>

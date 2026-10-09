@@ -4,11 +4,13 @@ export type SourceKind = "camera" | "test";
 
 /**
  * Local media. "camera" is the real mic and camera, with echo cancellation on. "test" is a
- * synthetic pattern and tone for machines without a camera, and for automated checks.
+ * synthetic pattern and tone for machines without a camera, and for automated checks;
+ * `heavy` adds per-frame noise so the encoder runs at its bitrate ceiling (congestion tests).
  */
 export async function captureLocal(
 	kind: SourceKind,
 	label: string,
+	options: { heavy?: boolean } = {},
 ): Promise<{ stream: MediaStream; stop: () => void }> {
 	if (kind === "camera") {
 		const stream = await navigator.mediaDevices.getUserMedia({
@@ -21,7 +23,7 @@ export async function captureLocal(
 		});
 		return { stream, stop: () => stopAll(stream) };
 	}
-	return testSource(label);
+	return testSource(label, options.heavy ?? false);
 }
 
 /**
@@ -119,7 +121,7 @@ function slideSource(label: string): { stream: MediaStream; stop: () => void } {
 	};
 }
 
-function testSource(label: string): { stream: MediaStream; stop: () => void } {
+function testSource(label: string, heavy: boolean): { stream: MediaStream; stop: () => void } {
 	const hue = [...label].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0);
 	const { stream: video, stopTicker } = canvasStream(CAMERA.width, CAMERA.height, CAMERA.framerate, (ctx, t) => {
 		const canvas = ctx.canvas;
@@ -129,6 +131,14 @@ function testSource(label: string): { stream: MediaStream; stop: () => void } {
 		const x = ((t * 160) % (canvas.width + 60)) - 60;
 		ctx.fillStyle = `hsl(${hue} 80% 60%)`;
 		ctx.fillRect(x, 0, 60, canvas.height);
+		if (heavy) {
+			// Random 8 px blocks every frame: incompressible, so the encoder hits its ceiling.
+			for (let by = 0; by < canvas.height; by += 8)
+				for (let bx = 0; bx < canvas.width; bx += 8) {
+					ctx.fillStyle = `hsl(${hue} 50% ${15 + Math.random() * 30}%)`;
+					ctx.fillRect(bx, by, 8, 8);
+				}
+		}
 		ctx.fillStyle = "white";
 		ctx.font = "bold 36px system-ui, sans-serif";
 		ctx.fillText(label, 24, 56);
