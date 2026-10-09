@@ -4,6 +4,7 @@ import { Time } from "@moq/net";
 import { Tracks } from "@moq-meeting/shared";
 import { type AudioRendition, toHex } from "./catalog";
 import { type MediaClock, Rebase } from "./clock";
+import { audioFrames } from "./track-reader";
 
 export const AUDIO = {
 	codec: "opus",
@@ -43,7 +44,7 @@ export class AudioPublisher {
 	}
 
 	async #run() {
-		this.#reader = new MediaStreamTrackProcessor<AudioData>({ track: this.#source }).readable.getReader();
+		this.#reader = audioFrames(this.#source).getReader();
 		for (;;) {
 			const { value: data, done } = await this.#reader.read();
 			if (done || this.#closed) {

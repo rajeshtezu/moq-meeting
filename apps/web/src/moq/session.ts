@@ -42,6 +42,12 @@ export interface SessionEvents {
 	onClosed(error?: Error): void;
 }
 
+function devWebSocketUrl(relayUrl: string): URL {
+	const url = new URL(relayUrl);
+	url.protocol = "ws:";
+	return url;
+}
+
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
 /** Below audio/video: chat can wait a few ms under congestion; the log itself is lossless. */
@@ -106,6 +112,9 @@ export class RoomSession {
 			webtransport: token.certificateHash
 				? { serverCertificateHashes: [{ algorithm: "sha-256", value: token.certificateHash }] }
 				: undefined,
+			// Dev relay (self-signed, pinned by hash): a WebSocket can't pin a certificate, so
+			// the fallback (Safari, old Firefox, UDP-blocked networks) uses its plain ws:// listener.
+			websocket: token.certificateHash ? { url: devWebSocketUrl(token.relayUrl) } : undefined,
 		});
 		this.#connection = connection;
 

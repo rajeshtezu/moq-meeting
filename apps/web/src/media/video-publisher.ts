@@ -5,6 +5,7 @@ import { Tracks } from "@moq-meeting/shared";
 import { toHex, type VideoRendition } from "./catalog";
 import { type MediaClock, Rebase } from "./clock";
 import { RateController } from "./rate";
+import { videoFrames } from "./track-reader";
 
 /** What the connection can tell a sender about its uplink. */
 export interface NetworkSignals {
@@ -56,8 +57,14 @@ export const SCREEN: VideoProfile = {
 	contentHint: "detail",
 };
 
-async function pickCodec(profile: VideoProfile, width: number, height: number): Promise<VideoEncoderConfig> {
+async function pickCodec(
+	profile: VideoProfile,
+	width: number,
+	height: number,
+	exclude: ReadonlySet<string>,
+): Promise<VideoEncoderConfig> {
 	for (const candidate of profile.codecs) {
+		if (exclude.has(candidate.codec)) continue;
 		const config: VideoEncoderConfig = {
 			...candidate,
 			width,
@@ -98,6 +105,9 @@ export class VideoPublisher {
 	readonly send = { bitrate: 0, grant: undefined as number | undefined, rtt: undefined as number | undefined };
 	#enabled = true;
 	#frameCount = 0;
+	#size = "";
+	/** Codecs that claimed support but failed at runtime (Firefox does this for H.264). */
+	readonly #failedCodecs = new Set<string>();
 	#forceKeyframe = false;
 	#closed = false;
 
@@ -131,9 +141,9 @@ export class VideoPublisher {
 	}
 
 	async #run() {
-		this.#reader = new MediaStreamTrackProcessor<VideoFrame>({ track: this.#source }).readable.getReader();
+		this.#reader = videoFrames(this.#source, this.#profile.framerate).getReader();
 		let lastKeyframe = Number.NEGATIVE_INFINITY;
-		let size = "";
+		this.#size = "";
 
 		for (;;) {
 			const { value: frame, done } = await this.#reader.read();
@@ -149,16 +159,25 @@ export class VideoPublisher {
 			// if they change, e.g. a shared window being resized.
 			const width = frame.displayWidth & ~1;
 			const height = frame.displayHeight & ~1;
-			if (!this.#encoder || `${width}x${height}` !== size) {
-				size = `${width}x${height}`;
+			if (!this.#encoder || `${width}x${height}` !== this.#size) {
+				this.#size = `${width}x${height}`;
 				if (this.#encoder?.state === "configured") {
 					await this.#encoder.flush().catch(() => {});
 					this.#encoder.close();
 				}
-				this.#config = { ...(await pickCodec(this.#profile, width, height)), bitrate: this.#rate.target };
+				this.#config = {
+					...(await pickCodec(this.#profile, width, height, this.#failedCodecs)),
+					bitrate: this.#rate.target,
+				};
 				this.#encoder = this.#createEncoder(this.#config);
 				this.send.bitrate = this.#config.bitrate ?? this.#profile.bitrate;
 				this.#forceKeyframe = true;
+			}
+
+			// The encoder can close itself on error; wait for the rebuild.
+			if (this.#encoder.state !== "configured") {
+				frame.close();
+				continue;
 			}
 
 			// Camera off: the track is disabled and yields black frames; send nothing.
@@ -191,8 +210,10 @@ export class VideoPublisher {
 	}
 
 	#createEncoder(config: VideoEncoderConfig): VideoEncoder {
+		let produced = false;
 		const encoder = new VideoEncoder({
 			output: (chunk, meta) => {
+				produced = true;
 				if (meta?.decoderConfig) {
 					this.#onRendition({
 						codec: meta.decoderConfig.codec,
@@ -208,7 +229,18 @@ export class VideoPublisher {
 				const pts = Time.Micro(this.#rebase.apply(chunk.timestamp));
 				this.#producer.encode(chunk as unknown as Container.Legacy.Source, pts, chunk.type === "key");
 			},
-			error: (err) => console.error("video encoder error", err),
+			error: (err) => {
+				if (!produced && this.#encoder === encoder) {
+					// `isConfigSupported` said yes but configure/encode failed before any output:
+					// blacklist the codec and rebuild with the next candidate on the next frame.
+					console.warn(`video encoder ${config.codec} failed (${err.message}); trying the next codec`);
+					this.#failedCodecs.add(config.codec);
+					this.#encoder = undefined;
+					this.#size = "";
+					return;
+				}
+				console.error("video encoder error", err);
+			},
 		});
 		encoder.configure(config);
 		return encoder;

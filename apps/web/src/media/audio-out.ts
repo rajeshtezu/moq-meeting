@@ -1,3 +1,5 @@
+import { resumeWhenAllowed } from "./track-reader";
+
 /**
  * Audio playout: one AudioContext for the page, one AudioWorklet jitter buffer per peer.
  *
@@ -112,7 +114,7 @@ export class AudioOut {
 		this.context = new AudioContext({ latencyHint: "interactive", sampleRate: SAMPLE_RATE });
 		const url = URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" }));
 		this.#ready = this.context.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url));
-		void this.context.resume();
+		resumeWhenAllowed(this.context, "playback");
 	}
 
 	async addPeer(): Promise<PeerAudio> {

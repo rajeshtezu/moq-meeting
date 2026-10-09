@@ -53,20 +53,22 @@ export function Room({ roomId }: { roomId: string }) {
 	const [busy, setBusy] = useState(false);
 	const current = useRef<Joined>(undefined);
 
-	async function onJoin(e: FormEvent) {
-		e.preventDefault();
+	async function onJoin(e?: FormEvent, nameOverride?: string) {
+		e?.preventDefault();
+		const who = (nameOverride ?? name).trim();
+		if (!who) return;
 		setBusy(true);
 		setJoinError(undefined);
-		saveName(name.trim());
+		saveName(who);
 
 		// Created inside the click so the browser allows audio playback.
 		const audioOut = new AudioOut();
 		let media: { stream: MediaStream; stop: () => void } | undefined;
 		try {
-			media = await captureLocal(source, name.trim(), {
+			media = await captureLocal(source, who, {
 				heavy: new URLSearchParams(window.location.search).get("heavy") === "1",
 			});
-			const token = await joinRoom(roomId, name.trim());
+			const token = await joinRoom(roomId, who);
 			// Dev/testing: `?relayPort=4444` routes this tab via scripts/netem.ts (the token is the same).
 			const relayPort = new URLSearchParams(window.location.search).get("relayPort");
 			if (relayPort && /^\d+$/.test(relayPort)) {
@@ -204,6 +206,59 @@ export function Room({ roomId }: { roomId: string }) {
 		j?.audioOut.close();
 		window.location.assign("/");
 	}
+
+	// Dev/testing aids for browsers we can't drive (e.g. a Firefox or Safari check):
+	// `?autojoin=1&name=X` joins on load; `&report=1` then posts this tab's view of the room
+	// (browser, transport, per-peer stats) to chat every 10 s, readable from another tab.
+	const params = new URLSearchParams(window.location.search);
+	const autojoin = params.get("autojoin") === "1";
+	const report = params.get("report") === "1";
+	const reportErrors = useRef<string[]>([]);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: run once on mount
+	useEffect(() => {
+		if (report) {
+			// Keep the last few errors so the report can include them.
+			const keep = (msg: string) => {
+				reportErrors.current.push(msg.slice(0, 160));
+				if (reportErrors.current.length > 6) reportErrors.current.shift();
+			};
+			const original = { error: console.error, warn: console.warn };
+			console.error = (...args: unknown[]) => {
+				keep(args.map(String).join(" "));
+				original.error(...args);
+			};
+			console.warn = (...args: unknown[]) => {
+				const msg = args.map(String).join(" ");
+				// The library warns on every routine group skip; keep only ours.
+				if (!msg.startsWith("skipping covered group")) keep(`warn: ${msg}`);
+				original.warn(...args);
+			};
+			window.addEventListener("unhandledrejection", (e) => keep(`unhandled: ${String(e.reason)}`));
+			window.addEventListener("error", (e) => keep(`error: ${e.message}`));
+		}
+		if (!autojoin) return;
+		const n = params.get("name") ?? undefined;
+		if (n) setName(n);
+		const t = setTimeout(() => void onJoin(undefined, n), 300);
+		return () => clearTimeout(t);
+	}, []);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: restart only when (re)joined
+	useEffect(() => {
+		if (!report || !joined) return;
+		const ua = navigator.userAgent.match(/(Firefox|Edg|Chrome|Version)\/[\d.]+/)?.[0] ?? "unknown";
+		const poll = setInterval(() => {
+			const peers = [...document.querySelectorAll("[data-testid=peer-tile]")].map(
+				(t) =>
+					`${t.querySelector("[data-testid=name]")?.textContent}: ${t.querySelector("[data-testid=stats]")?.textContent?.replace("\n", " | ") ?? "no stats"}`,
+			);
+			const send = joined.session.sendStats;
+			const errs = reportErrors.current.length ? `; errors: ${reportErrors.current.join(" || ")}` : "";
+			sendChat(
+				`[report ${ua}${ua.startsWith("Version") ? " Safari" : ""}] ${joined.session.transport}; tx ${send?.bitrate ? `${Math.round(send.bitrate / 1000)} kbps` : "no video"}; rx ${peers.join(" // ") || "no peers"}${errs}`,
+			);
+		}, 10_000);
+		return () => clearInterval(poll);
+	}, [joined]);
 
 	useEffect(() => {
 		const onUnload = () => current.current?.session.close();

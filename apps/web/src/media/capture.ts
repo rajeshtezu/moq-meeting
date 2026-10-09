@@ -1,3 +1,4 @@
+import { resumeWhenAllowed } from "./track-reader";
 import { CAMERA, SCREEN } from "./video-publisher";
 
 export type SourceKind = "camera" | "test";
@@ -148,6 +149,7 @@ function testSource(label: string, heavy: boolean): { stream: MediaStream; stop:
 
 	// A short 440 Hz beep each second.
 	const audioCtx = new AudioContext({ sampleRate: 48_000 });
+	resumeWhenAllowed(audioCtx, "test tone");
 	const osc = audioCtx.createOscillator();
 	const gain = audioCtx.createGain();
 	const dest = audioCtx.createMediaStreamDestination();

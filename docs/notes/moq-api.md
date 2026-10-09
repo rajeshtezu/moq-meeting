@@ -138,3 +138,32 @@ Findings:
 - `getDisplayMedia` constraints (`max` width/height/frameRate) make Chrome downscale at capture, which is simpler than encoder-side scaling.
 - A track's `ended` event fires when the user clicks the browser's "Stop sharing" bar, but not on `track.stop()`. To test it, dispatch `new Event("ended")` on the track.
 - Restarting `bun run dev` under open tabs leaves stale errors in their console buffer (WebTransport "Connection lost", an HMR socket failure, a Bun "Failed to load bundled module"). They persist across reloads in the in-app browser, so hook `console.error` to see only new ones.
+
+## Hardening (Phase 5)
+
+**Reconnect**
+- `new Moq.Connection({ url, publish, consume, webtransport, websocket })` is a reconnect loop. `status` is `"connecting" | "connected" | "disconnected"` and `error` holds a fatal error (e.g. auth refused, which stops retrying). With our own origin, our broadcasts are re-announced on each new session.
+- `tls.generate` makes a new cert on every relay start, so a client pinned to the old fingerprint can't reconnect. `scripts/dev.ts` now creates a persistent 10-day cert (`infra/relay/dev-tls/`; pinning only works for certs valid ≤ 14 days).
+- A WebSocket can't pin a certificate, so in dev the fallback dials the relay's plain `ws://` listener (`websocket.url`). In prod the real cert makes `wss://` just work.
+
+**Measuring**
+- **AudioDecoder output timestamps are synthesized** from the first chunk plus decoded samples (at least in Chrome). After skipped frames they run ahead of the real PTS, by about 800 ms in our join-burst test. Measure audio latency on *arrival* (`Container.Consumer.next()`), not at decoder output. Video decoder output keeps input timestamps.
+- `connection.stats()` came back `{}` in Chrome (no `estimatedSendRate`), so `connection.bandwidth` reservations report `undefined` ("hold your rate").
+- `connection.probe` gives `{ rtt, estimatedRecvRate }`. RTT is useful but noisy (single samples spike tens of ms on a clean link), so use a median. `estimatedRecvRate` was nonsense through our netem proxy, probably packet-pair estimation fooled by the proxy releasing packets in ms-timer bursts.
+- **Join burst:** a new subscriber receives each track's *current* group from its start (up to a GoP of video and ~1 s of audio) all at once. On a slow link that burst is what congests first.
+
+**Congestion behavior**
+- Skipping is per group, so a starved video stream can lag by up to its GoP (2 s here) before a group is skipped. Hence the receiver-side audio-only fallback.
+- Relay priorities only help when the relay's own sending is the bottleneck. A FIFO queue downstream of it (our netem; real routers) doesn't know about priorities.
+
+**Cross-browser**
+- Firefox 157: `VideoEncoder.isConfigSupported({ codec: "avc1.42E01F", avc: { format: "annexb" }, latencyMode: "realtime" })` says supported, but `configure()` errors with `EncodingError`. Fall back to the next codec on an error before the first output.
+- Firefox runs an AudioWorklet only if the graph pulls on it. A capture node with `numberOfOutputs: 0` never gets `process()`, so give it one silent output connected to the destination.
+- Firefox: without a user gesture, `AudioContext.resume()` **never settles**, so never `await` it. See `resumeWhenAllowed()` in `track-reader.ts`.
+- No `MediaStreamTrackProcessor` in Firefox or Safari. The fallback grabs video with `new VideoFrame(videoElement)` from `requestVideoFrameCallback`, or a worker tick when the tab is hidden, and audio from an AudioWorklet batched into 20 ms 48 kHz `AudioData`.
+- Safari 27 connects over the WebSocket fallback, and its H.264 encoder/decoder and VP8 decoder work.
+
+**Testing gotchas**
+- Every edit to a client module makes Bun HMR full-reload *all* open tabs, which leave the room. Rejoin them before reading results.
+- In-app browser tabs share one `localStorage`, so a rejoin can pick up another tab's saved name (we chased a "ghost Alice" this way).
+- The browser tool's scripts time out at 45 s. For longer measurements, sample into a `window` variable and read it later.

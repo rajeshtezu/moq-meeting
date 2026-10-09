@@ -4,7 +4,7 @@
 |---|---|
 | Project | `moq-meeting` — small browser-based meeting app on Media over QUIC |
 | Owner | Rajesh Kumar |
-| Status | Approved with defaults (2026-10-09). Phases 0–4 complete. |
+| Status | Approved with defaults (2026-10-09). Phases 0–5 complete. |
 | Date | 2026-10-09 |
 | References | [doc.moq.dev](https://doc.moq.dev/), [moq-lite concepts](https://doc.moq.dev/concept/moq-lite.html), [hang format](https://doc.moq.dev/concept/hang.html), [relay](https://doc.moq.dev/bin/relay/), [relay auth](https://doc.moq.dev/bin/relay/auth.html), [JS libraries](https://doc.moq.dev/lib/js/), [Bun](https://bun.com/) |
 
@@ -320,7 +320,28 @@ Details:
 
 **Not yet verified:** a real `getDisplayMedia` capture (needs the user's picker), resizing a real shared window, and screen share under constrained bandwidth.
 
-## 20. Next steps
+## 20. Phase 5 outcome (hardening)
 
-1. Manual check, still open: two machines with real cameras, speakers and a real screen share (echo, latency, speaking threshold, window resize).
-2. Phase 5 (optional hardening): network throttling tests, a stats overlay with dropped groups, a lower rendition or adaptive bitrate, a Firefox check, and the reconnecting `Moq.Connection` handle.
+Tested with three Chrome tabs plus Firefox 157 and Safari 27 on one Mac. Network impairment came from `scripts/netem.ts`, a userspace UDP proxy applied to one tab via `?relayPort=4444`.
+
+| Area | Result |
+|---|---|
+| **Reconnect** | `Moq.Connection` handle: killing the relay mid-call showed "reconnecting…", reconnected after **3.2 s** (1 s relay restart + backoff), and video, audio and presence were back by **4.2 s**. The dev relay now uses a persistent cert so the pinned fingerprint survives restarts. |
+| **Downlink congestion** (300 kbps, 2% loss, +40 ms; ~450 kbps needed) | Before: audio gaps ~1.5/s, and a starved video stream sat up to **2.5 s** behind (groups only skip at GoP boundaries). After: the starved stream drops to audio-only ("video paused: weak connection", retry with 15 → 60 s backoff), audio arrival latency is mostly 45–55 ms, and gaps fall to **~0.1–0.2/s** once the adaptive jitter buffer settles (playout delay grows to 200 ms on this link). |
+| 1 Mbps, 5% loss, +40 ms (intake target) | Fits the load: video 25–33 fps, audio continuous with occasional gaps |
+| **Uplink congestion** (400 kbps up, incompressible source) | Chrome exposes no send-rate estimate over WebTransport, so `@moq/net`'s allocator grant stays `undefined`. The delay-based fallback (PROBE RTT) cut 800 → 150–280 kbps, but only after ~25 s: most of the backlog sits in the local QUIC send buffer where RTT can't see it. Receivers' audio-only fallback covers the gap, keeping audio at ~10 ms. |
+| Clean link | The controller holds 800 kbps, the jitter buffer stays at 60 ms, and there are no gaps or skips |
+| **Firefox 157** | WebTransport. Receive works (H.264 and VP8, 30 fps). Publish works after a runtime codec fallback: `isConfigSupported` accepts H.264 but `configure` throws `EncodingError`, so we retry with VP8. Capture uses the non-MSTP fallback. |
+| **Safari 27** | WebSocket fallback. Publishes H.264 and receives H.264 and VP8 at 20–27 fps, with the non-MSTP capture fallback. |
+| Stats overlay | Per peer: fps, resolution, codec, kbps, video/audio latency, skipped groups, audio gaps, jitter-buffer depth, paused state. On self: send bitrate, grant, RTT. |
+
+**Not verified:**
+- Firefox/Safari **audio** capture and playback. The automated (autojoin) tabs had no user gesture, so their AudioContexts stayed suspended. That's confirmed in their reports; a single click resumes them, since listeners are installed.
+- Real cameras and microphones, echo, and real screen capture. These are carried over from earlier phases.
+
+## 21. Next steps (beyond the POC)
+
+1. Manual checks: two machines with real devices. Click once in Firefox and Safari to confirm their audio.
+2. **Simulcast** (a 180p rendition alongside 360p) so receivers on weak links downgrade instead of dropping to audio-only. The catalog already supports multiple renditions.
+3. A better uplink signal for ABR. Options: WebTransport `getStats().estimatedSendRate` once Chrome populates it, or the encoder output rate vs. bytes acknowledged.
+4. Deploy per [DEPLOYMENT.md](DEPLOYMENT.md) and repeat the impairment tests on real networks.
